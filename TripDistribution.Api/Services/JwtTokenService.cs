@@ -24,8 +24,7 @@ public class JwtTokenService : IJwtTokenService
 
     public (string Token, DateTime ExpiresAt) GenerateToken(User user)
     {
-        var secretKey = _configuration["JwtSettings:SecretKey"] 
-            ?? "SplitBillSuperSecretKey_ForTripDistribution_ProductionReady_2026_Key_MustBeLongEnough!";
+        var secretKey = _configuration["JwtSettings:SecretKey"];
         var issuer = _configuration["JwtSettings:Issuer"] ?? "TripDistribution.Api";
         var audience = _configuration["JwtSettings:Audience"] ?? "TripDistribution.Client";
         var expiryMinutes = int.TryParse(_configuration["JwtSettings:ExpiryInMinutes"], out var mins) ? mins : 43200; // 30 days

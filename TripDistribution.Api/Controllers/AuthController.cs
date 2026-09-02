@@ -113,11 +113,15 @@ public class AuthController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.Password))
                 return BadRequest(ApiResponse.Fail("Phone and password are required."));
 
+
             var existing = await _authDataService.GetUserByPhoneAsync(dto.Phone);
             if (existing != null)
                 return BadRequest(ApiResponse.Fail("User with this phone number already exists."));
 
             var passwordHash = HashPassword(dto.Password);
+
+            // have to make in same transaction create user + generate toke + save token
+
             var user = await _authDataService.CreateUserAsync(dto, passwordHash);
 
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
