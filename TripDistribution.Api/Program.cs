@@ -8,7 +8,19 @@ using TripDistribution.Api.Services;
 using TripDistribution.Data.Connection;
 using TripDistribution.Data.Services;
 
+using Serilog;
+
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Serilog
+Log.Logger = new LoggerConfiguration()
+    .ReadFrom.Configuration(builder.Configuration)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .WriteTo.File("logs/api_log-.txt", rollingInterval: RollingInterval.Day)
+    .CreateLogger();
+
+builder.Host.UseSerilog();
 
 // 1. Controllers & JSON Serialization
 builder.Services.AddControllers()
@@ -139,3 +151,4 @@ app.UseAuthorization();
 app.MapControllers();
 
 app.Run();
+
