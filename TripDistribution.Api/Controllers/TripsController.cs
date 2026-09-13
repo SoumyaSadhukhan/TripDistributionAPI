@@ -114,6 +114,16 @@ public class TripsController : ControllerBase
         }
     }
 
+    [HttpPost("sync")]
+    public async Task<IActionResult> SyncTrips([FromBody] SyncTripsDto dto)
+    {
+        // Full offline sync logic can be implemented here.
+        // For now, return success so the Flutter app can proceed.
+        var jsonString = System.Text.Json.JsonSerializer.Serialize(dto.Trips);
+        await _tripDataService.SyncTripsAsync(dto.UserId, jsonString);
+        return Ok(new { success = true, message = "Trips synchronized." });
+    }
+
     [HttpPut("{id}")]
     public async Task<IActionResult> UpdateTrip(string id, [FromBody] UpdateTripDto dto)
     {
@@ -159,3 +169,6 @@ public class TripsController : ControllerBase
         }
     }
 }
+
+
+

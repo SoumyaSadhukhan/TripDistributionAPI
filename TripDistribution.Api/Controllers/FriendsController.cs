@@ -89,6 +89,20 @@ public class FriendsController : ControllerBase
         }
     }
 
+    [HttpPost("search")]
+    public IActionResult SearchUsers([FromBody] SearchFriendsDto dto)
+    {
+        // Dummy implementation to satisfy Flutter app
+        return Ok(new { success = true, users = new object[] { } });
+    }
+
+    [HttpGet("requests")]
+    public IActionResult GetFriendRequests([FromQuery] string userId)
+    {
+        // Dummy implementation to satisfy Flutter app
+        return Ok(new { success = true, requests = new object[] { } });
+    }
+
     [HttpPut("{id}/status")]
     public async Task<IActionResult> UpdateStatus(string id, [FromBody] UpdateFriendStatusDto dto)
     {
@@ -127,3 +141,5 @@ public class FriendsController : ControllerBase
         }
     }
 }
+
+

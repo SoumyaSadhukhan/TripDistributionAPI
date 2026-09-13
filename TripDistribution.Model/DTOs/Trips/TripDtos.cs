@@ -2,6 +2,7 @@ namespace TripDistribution.Model.DTOs.Trips;
 
 public class CreateTripDto
 {
+    public string? TripId { get; set; }
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public string CurrencyCode { get; set; } = "INR";

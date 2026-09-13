@@ -18,6 +18,8 @@ public interface ITripDataService
     Task<Trip> CreateTripAsync(string userId, string? userPhone, string? userName, DietType dietType, string? dietName, CreateTripDto dto);
     Task<bool> UpdateTripAsync(string tripId, UpdateTripDto dto);
     Task<bool> DeleteTripAsync(string tripId);
+      Task<bool> SyncTripsAsync(string userId, string jsonTrips);
+      
 }
 
 public class TripDataService : ITripDataService
@@ -191,7 +193,7 @@ public class TripDataService : ITripDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
-            var tripId = Guid.NewGuid().ToString();
+            var tripId = !string.IsNullOrWhiteSpace(dto.TripId) ? dto.TripId : Guid.NewGuid().ToString();
             var groupId = Guid.NewGuid().ToString();
             var personId = Guid.NewGuid().ToString();
             var collabId = Guid.NewGuid().ToString();
@@ -291,7 +293,162 @@ public class TripDataService : ITripDataService
         }
     }
 
-    public async Task<bool> DeleteTripAsync(string tripId)
+                  public async Task<bool> SyncTripsAsync(string userId, string jsonTrips)
+        {
+            try
+            {
+                using var conn = await _connectionFactory.CreateConnectionAsync();
+                const string sql = @"
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    SELECT 
+        JSON_VALUE(value, '$.id') AS trip_id,
+        JSON_VALUE(value, '$.name') AS name,
+        JSON_VALUE(value, '$.description') AS description,
+        ISNULL(JSON_VALUE(value, '$.currencyCode'), 'INR') AS currency_code
+    INTO #TempTrips
+    FROM OPENJSON(@Json);
+
+    MERGE INTO Trips AS Target
+    USING #TempTrips AS Source
+    ON (Target.trip_id = Source.trip_id)
+    WHEN MATCHED THEN
+        UPDATE SET 
+            name = Source.name, 
+            description = Source.description,
+            currency_code = Source.currency_code,
+            updated_at = GETDATE()
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (trip_id, user_id, name, description, currency_code, created_at, updated_at)
+        VALUES (Source.trip_id, @UserId, Source.name, Source.description, Source.currency_code, GETDATE(), GETDATE());
+
+    SELECT 
+        JSON_VALUE(t.value, '$.id') AS trip_id,
+        JSON_VALUE(g.value, '$.id') AS group_id,
+        JSON_VALUE(g.value, '$.name') AS name
+    INTO #TempGroups
+    FROM OPENJSON(@Json) t
+    CROSS APPLY OPENJSON(t.value, '$.groups') g;
+
+    MERGE INTO Groups AS Target
+    USING #TempGroups AS Source
+    ON (Target.group_id = Source.group_id)
+    WHEN MATCHED THEN
+        UPDATE SET name = Source.name
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (group_id, trip_id, name, created_at)
+        VALUES (Source.group_id, Source.trip_id, Source.name, GETDATE());
+
+    SELECT 
+        JSON_VALUE(t.value, '$.id') AS trip_id,
+        JSON_VALUE(g.value, '$.id') AS group_id,
+        JSON_VALUE(p.value, '$.id') AS person_id,
+        JSON_VALUE(p.value, '$.userId') AS user_id,
+        JSON_VALUE(p.value, '$.phoneNumber') AS phone_number,
+        JSON_VALUE(p.value, '$.name') AS name,
+        CAST(ISNULL(JSON_VALUE(p.value, '$.dietType'), '0') AS INT) AS diet_type,
+        ISNULL(JSON_VALUE(p.value, '$.dietName'), 'Vegetarian') AS diet_name,
+        CAST(ISNULL(JSON_VALUE(p.value, '$.paidAmount'), '0') AS DECIMAL(18,2)) AS paid_amount,
+        CAST(ISNULL(JSON_VALUE(p.value, '$.owedAmount'), '0') AS DECIMAL(18,2)) AS owed_amount,
+        CAST(ISNULL(JSON_VALUE(p.value, '$.balance'), '0') AS DECIMAL(18,2)) AS balance
+    INTO #TempPersons
+    FROM OPENJSON(@Json) t
+    CROSS APPLY OPENJSON(t.value, '$.groups') g
+    CROSS APPLY OPENJSON(g.value, '$.members') p;
+
+    MERGE INTO Persons AS Target
+    USING #TempPersons AS Source
+    ON (Target.person_id = Source.person_id)
+    WHEN MATCHED THEN
+        UPDATE SET 
+            group_id = Source.group_id,
+            user_id = Source.user_id,
+            phone_number = Source.phone_number,
+            name = Source.name,
+            diet_type = Source.diet_type,
+            diet_name = Source.diet_name,
+            paid_amount = Source.paid_amount,
+            owed_amount = Source.owed_amount,
+            balance = Source.balance
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (person_id, group_id, trip_id, user_id, phone_number, name, diet_type, diet_name, paid_amount, owed_amount, balance, created_at)
+        VALUES (Source.person_id, Source.group_id, Source.trip_id, Source.user_id, Source.phone_number, Source.name, Source.diet_type, Source.diet_name, Source.paid_amount, Source.owed_amount, Source.balance, GETDATE());
+
+    SELECT 
+        JSON_VALUE(t.value, '$.id') AS trip_id,
+        JSON_VALUE(e.value, '$.id') AS expense_id,
+        JSON_VALUE(e.value, '$.description') AS description,
+        CAST(ISNULL(JSON_VALUE(e.value, '$.amount'), '0') AS DECIMAL(18,2)) AS amount,
+        ISNULL(JSON_VALUE(e.value, '$.currencyCode'), 'INR') AS currency_code,
+        CAST(ISNULL(JSON_VALUE(e.value, '$.categoryIndex'), '0') AS INT) AS category_index,
+        ISNULL(JSON_VALUE(e.value, '$.categoryName'), 'General') AS category_name,
+        JSON_VALUE(e.value, '$.paidByPersonId') AS paid_by_person_id,
+        ISNULL(JSON_VALUE(e.value, '$.splitType'), 'EQUAL') AS split_type,
+        ISNULL(CAST(JSON_VALUE(e.value, '$.date') AS DATETIME), GETDATE()) AS expense_date
+    INTO #TempExpenses
+    FROM OPENJSON(@Json) t
+    CROSS APPLY OPENJSON(t.value, '$.expenses') e;
+
+    MERGE INTO Expenses AS Target
+    USING #TempExpenses AS Source
+    ON (Target.expense_id = Source.expense_id)
+    WHEN MATCHED THEN
+        UPDATE SET 
+            description = Source.description,
+            amount = Source.amount,
+            currency_code = Source.currency_code,
+            category_index = Source.category_index,
+            category_name = Source.category_name,
+            paid_by_person_id = Source.paid_by_person_id,
+            split_type = Source.split_type,
+            expense_date = Source.expense_date
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (expense_id, trip_id, description, amount, currency_code, category_index, category_name, paid_by_person_id, split_type, expense_date, created_at)
+        VALUES (Source.expense_id, Source.trip_id, Source.description, Source.amount, Source.currency_code, Source.category_index, Source.category_name, Source.paid_by_person_id, Source.split_type, Source.expense_date, GETDATE());
+
+    SELECT 
+        JSON_VALUE(t.value, '$.id') AS trip_id,
+        JSON_VALUE(e.value, '$.id') AS expense_id,
+        JSON_VALUE(s.value, '$.id') AS split_id,
+        JSON_VALUE(s.value, '$.personId') AS person_id,
+        CAST(ISNULL(JSON_VALUE(s.value, '$.amount'), '0') AS DECIMAL(18,2)) AS amount
+    INTO #TempSplits
+    FROM OPENJSON(@Json) t
+    CROSS APPLY OPENJSON(t.value, '$.expenses') e
+    CROSS APPLY OPENJSON(e.value, '$.splits') s;
+
+    MERGE INTO ExpenseSplits AS Target
+    USING #TempSplits AS Source
+    ON (Target.split_id = Source.split_id)
+    WHEN MATCHED THEN
+        UPDATE SET 
+            amount = Source.amount
+    WHEN NOT MATCHED BY TARGET THEN
+        INSERT (split_id, expense_id, trip_id, person_id, amount, created_at)
+        VALUES (Source.split_id, Source.expense_id, Source.trip_id, Source.person_id, Source.amount, GETDATE());
+
+    COMMIT TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT > 0
+        ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+                ";
+
+                await conn.ExecuteAsync(sql, new { UserId = userId, Json = jsonTrips });
+                _logger.LogInformation("Synced trips for user {UserId}", userId);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Exception in SyncTripsAsync for user: {UserId}", userId);
+                return false;
+            }
+        }
+
+        public async Task<bool> DeleteTripAsync(string tripId)
     {
         try
         {
@@ -317,3 +474,10 @@ public class TripDataService : ITripDataService
         }
     }
 }
+
+
+
+
+
+
+

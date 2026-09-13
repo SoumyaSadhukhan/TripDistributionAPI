@@ -371,6 +371,48 @@ public class AuthController : ControllerBase
         }
     }
 
+        [HttpPost("verify-token")]
+    [AllowAnonymous]
+    public async Task<IActionResult> VerifyToken([FromBody] TripDistribution.Model.DTOs.Auth.VerifyTokenDto dto)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(dto.Token))
+                return BadRequest(ApiResponse.Fail("Token is required."));
+
+            var tokenRecord = await _authDataService.GetTokenAsync(dto.Token);
+            if (tokenRecord == null)
+                return Ok(new { valid = false, message = "Invalid token." });
+
+            if (tokenRecord.ExpiresAt < DateTime.UtcNow)
+                return Ok(new { valid = false, message = "Token expired." });
+
+            var user = await _authDataService.GetUserByIdAsync(tokenRecord.UserId);
+            if (user == null)
+                return Ok(new { valid = false, message = "User not found." });
+
+            return Ok(new
+            {
+                valid = true,
+                user = new
+                {
+                    id = user.UserId,
+                    phone = user.PhoneNumber,
+                    fullName = user.FullName,
+                    dietType = user.DietType,
+                    isBiometricEnabled = user.IsBiometricEnabled,
+                    createdAt = user.CreatedAt,
+                    lastLoginAt = user.LastLoginAt
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in VerifyToken");
+            return StatusCode(500, ApiResponse.Fail("Failed to verify token."));
+        }
+    }
+
     [HttpPost("logout")]
     [Authorize]
     public async Task<IActionResult> Logout()
@@ -397,3 +439,5 @@ public class AuthController : ControllerBase
         }
     }
 }
+
+
