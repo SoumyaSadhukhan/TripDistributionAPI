@@ -130,15 +130,36 @@ public class ExpenseDataService : IExpenseDataService
                 if (persons.Count > 0)
                 {
                     var perPerson = Math.Round(dto.Amount / persons.Count, 2);
-                    splits = persons.Select(p => new ExpenseSplitItemDto
+                    var splitList = new List<ExpenseSplitItemDto>();
+                    decimal curSum = 0;
+                    for (int i = 0; i < persons.Count; i++)
                     {
-                        PersonId = p.PersonId,
-                        Amount = perPerson
-                    }).ToList();
+                        decimal amount = (i == persons.Count - 1) ? (dto.Amount - curSum) : perPerson;
+                        curSum += amount;
+                        splitList.Add(new ExpenseSplitItemDto
+                        {
+                            PersonId = persons[i].PersonId,
+                            Amount = amount
+                        });
+                    }
+                    splits = splitList;
                 }
                 else
                 {
                     splits = [];
+                }
+            }
+            else
+            {
+                var splitsTotal = splits.Sum(s => s.Amount);
+                var diff = dto.Amount - splitsTotal;
+                if (Math.Abs(diff) > 0.00m && Math.Abs(diff) <= 0.10m)
+                {
+                    splits[^1].Amount += diff;
+                }
+                else if (Math.Abs(diff) > 0.10m)
+                {
+                    throw new InvalidOperationException($"The sum of split amounts ({splitsTotal}) does not equal total expense amount ({dto.Amount}).");
                 }
             }
 
@@ -237,6 +258,17 @@ public class ExpenseDataService : IExpenseDataService
 
                 if (dto.Splits != null && dto.Splits.Count > 0)
                 {
+                    var splitsTotal = dto.Splits.Sum(s => s.Amount);
+                    var diff = dto.Amount - splitsTotal;
+                    if (Math.Abs(diff) > 0.00m && Math.Abs(diff) <= 0.10m)
+                    {
+                        dto.Splits[^1].Amount += diff;
+                    }
+                    else if (Math.Abs(diff) > 0.10m)
+                    {
+                        throw new InvalidOperationException($"The sum of split amounts ({splitsTotal}) does not equal total expense amount ({dto.Amount}).");
+                    }
+
                     const string insertSplit = @"
                         INSERT INTO ExpenseSplits (split_id, expense_id, trip_id, person_id, amount, created_at)
                         VALUES (@SplitId, @ExpenseId, @TripId, @PersonId, @Amount, GETDATE())";
@@ -332,11 +364,19 @@ public class ExpenseDataService : IExpenseDataService
             }
 
             var share = Math.Round(totalAmount / eligible.Count, 2);
-            return eligible.Select(p => new ExpenseSplitItemDto
+            var splits = new List<ExpenseSplitItemDto>();
+            decimal currentSum = 0;
+            for (int i = 0; i < eligible.Count; i++)
             {
-                PersonId = p.PersonId,
-                Amount = share
-            }).ToList();
+                decimal amount = (i == eligible.Count - 1) ? (totalAmount - currentSum) : share;
+                currentSum += amount;
+                splits.Add(new ExpenseSplitItemDto
+                {
+                    PersonId = eligible[i].PersonId,
+                    Amount = amount
+                });
+            }
+            return splits;
         }
         catch (Exception ex)
         {
