@@ -14,6 +14,13 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Cloud hosting dynamic port binding (Render, Railway, Fly.io, Cloud Run)
+var cloudPort = Environment.GetEnvironmentVariable("PORT");
+if (!string.IsNullOrEmpty(cloudPort))
+{
+    builder.WebHost.UseUrls($"http://*:{cloudPort}");
+}
+
 // Configure Serilog
 Log.Logger = new LoggerConfiguration()
     .ReadFrom.Configuration(builder.Configuration)
