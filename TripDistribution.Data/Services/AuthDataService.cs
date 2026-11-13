@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using TripDistribution.Data.Connection;
 using TripDistribution.Model.DTOs.Auth;
 using TripDistribution.Model.Entities;
-using static System.Net.WebRequestMethods;
 
 namespace TripDistribution.Data.Services;
 
@@ -11,8 +10,11 @@ public interface IAuthDataService
 {
     Task<User?> GetUserByPhoneAsync(string phone);
     Task<User?> GetUserByIdAsync(string userId);
+    Task<User?> FindUserAsync(string? userId, string? username, string? email, string? phone);
     Task<bool> SaveOtpAsync(string phone, string otpCode, string purpose, int expiryMinutes = 10);
+    Task<bool> SaveOtpAsync(string? userId, string? email, string? phone, string otpCode, string purpose, int expiryMinutes = 10);
     Task<bool> VerifyOtpAsync(string phone, string otpCode, string purpose);
+    Task<bool> VerifyOtpAsync(string? userId, string? email, string? phone, string otpCode, string purpose);
     Task<User> CreateUserAsync(RegisterRequestDto dto, string passwordHash);
     Task SaveUserTokenAsync(UserToken token);
     Task<UserToken?> GetTokenAsync(string token);
@@ -39,13 +41,13 @@ public class AuthDataService : IAuthDataService
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             const string sql = @"
-                SELECT user_id AS UserId, phone_number AS PhoneNumber, full_name AS FullName, 
+                SELECT user_id AS UserId, phone_number AS PhoneNumber, email AS Email, username AS Username, full_name AS FullName, 
                        password_hash AS PasswordHash, auth_token AS AuthToken, token_expiry AS TokenExpiry,
                        diet_type AS DietType, diet_name AS DietName, avatar_color AS AvatarColor,
                        is_biometric_enabled AS IsBiometricEnabled, is_active AS IsActive,
                        created_at AS CreatedAt, updated_at AS UpdatedAt, last_login_at AS LastLoginAt
                 FROM Users 
-                WHERE phone_number = @Phone AND is_active = 1";
+                WHERE phone_number = @Phone";
             return await conn.QuerySingleOrDefaultAsync<User>(sql, new { Phone = phone });
         }
         catch (Exception ex)
@@ -61,13 +63,13 @@ public class AuthDataService : IAuthDataService
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             const string sql = @"
-                SELECT user_id AS UserId, phone_number AS PhoneNumber, full_name AS FullName, 
+                SELECT user_id AS UserId, phone_number AS PhoneNumber, email AS Email, username AS Username, full_name AS FullName, 
                        password_hash AS PasswordHash, auth_token AS AuthToken, token_expiry AS TokenExpiry,
                        diet_type AS DietType, diet_name AS DietName, avatar_color AS AvatarColor,
                        is_biometric_enabled AS IsBiometricEnabled, is_active AS IsActive,
                        created_at AS CreatedAt, updated_at AS UpdatedAt, last_login_at AS LastLoginAt
                 FROM Users 
-                WHERE user_id = @UserId AND is_active = 1";
+                WHERE user_id = @UserId";
             return await conn.QuerySingleOrDefaultAsync<User>(sql, new { UserId = userId });
         }
         catch (Exception ex)
@@ -77,70 +79,122 @@ public class AuthDataService : IAuthDataService
         }
     }
 
-    public async Task<bool> SaveOtpAsync(string phone, string otpCode, string purpose, int expiryMinutes = 10)
+    public async Task<User?> FindUserAsync(string? userId, string? username, string? email, string? phone)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                SELECT TOP 1 user_id AS UserId, phone_number AS PhoneNumber, email AS Email, username AS Username, full_name AS FullName, 
+                       password_hash AS PasswordHash, auth_token AS AuthToken, token_expiry AS TokenExpiry,
+                       diet_type AS DietType, diet_name AS DietName, avatar_color AS AvatarColor,
+                       is_biometric_enabled AS IsBiometricEnabled, is_active AS IsActive,
+                       created_at AS CreatedAt, updated_at AS UpdatedAt, last_login_at AS LastLoginAt
+                FROM Users 
+                WHERE (@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
+                   OR (@Username IS NOT NULL AND @Username <> '' AND username = @Username)
+                   OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
+                   OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone)";
+            return await conn.QuerySingleOrDefaultAsync<User>(sql, new { UserId = userId, Username = username, Email = email, Phone = phone });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error finding user by identifier");
+            throw;
+        }
+    }
+
+    public Task<bool> SaveOtpAsync(string phone, string otpCode, string purpose, int expiryMinutes = 10)
+        => SaveOtpAsync(null, null, phone, otpCode, purpose, expiryMinutes);
+
+    public async Task<bool> SaveOtpAsync(string? userId, string? email, string? phone, string otpCode, string purpose, int expiryMinutes = 10)
     {
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             
-            // Invalidate old OTPs for this phone + purpose
-            await conn.ExecuteAsync(
-                "UPDATE OtpVerification SET is_verified = 1 WHERE phone_number = @Phone AND purpose = @Purpose AND is_verified = 0",
-                new { Phone = phone, Purpose = purpose });
+            // Invalidate old OTPs for matching destination
+            const string invalidateSql = @"
+                UPDATE OtpVerification 
+                SET is_verified = 1 
+                WHERE is_verified = 0 
+                  AND purpose = @Purpose 
+                  AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
+                    OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
+                    OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))";
+            await conn.ExecuteAsync(invalidateSql, new { UserId = userId, Email = email, Phone = phone, Purpose = purpose });
 
             const string sql = @"
-                INSERT INTO OtpVerification (otp_id, phone_number, otp_code, purpose, is_verified, expires_at, created_at)
-                VALUES (@OtpId, @Phone, @OtpCode, @Purpose, 0, @ExpiresAt, GETDATE())";
+                INSERT INTO OtpVerification (otp_id, user_id, phone_number, email, otp_code, purpose, is_verified, expires_at, created_at)
+                VALUES (@OtpId, @UserId, @Phone, @Email, @OtpCode, @Purpose, 0, @ExpiresAt, GETDATE())";
 
             var rows = await conn.ExecuteAsync(sql, new
             {
                 OtpId = Guid.NewGuid().ToString(),
-                Phone = phone,
+                UserId = userId,
+                Phone = !string.IsNullOrWhiteSpace(phone) ? phone : (userId ?? email ?? "N/A"),
+                Email = email,
                 OtpCode = otpCode,
                 Purpose = purpose,
                 ExpiresAt = DateTime.UtcNow.AddMinutes(expiryMinutes)
             });
 
-            _logger.LogInformation("Saved OTP for phone: {Phone}, purpose: {Purpose}", phone, purpose);
-            Console.WriteLine($"OTP for {phone} is: {otpCode}");
+            _logger.LogInformation("Saved OTP for user: {UserId}, email: {Email}, phone: {Phone}, purpose: {Purpose}", userId, email, phone, purpose);
+            Console.WriteLine($"OTP for {(email ?? phone ?? userId)} is: {otpCode}");
             return rows > 0;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error saving OTP for phone: {Phone}", phone);
+            _logger.LogError(ex, "Error saving OTP");
             throw;
         }
     }
 
-    public async Task<bool> VerifyOtpAsync(string phone, string otpCode, string purpose)
+    public Task<bool> VerifyOtpAsync(string phone, string otpCode, string purpose)
+        => VerifyOtpAsync(null, null, phone, otpCode, purpose);
+
+    public async Task<bool> VerifyOtpAsync(string? userId, string? email, string? phone, string otpCode, string purpose)
     {
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             const string sql = @"
-                SELECT TOP 1 otp_id 
+                SELECT TOP 1 otp_id, user_id
                 FROM OtpVerification 
-                WHERE phone_number = @Phone 
-                  AND otp_code = @OtpCode 
+                WHERE otp_code = @OtpCode 
                   AND purpose = @Purpose 
                   AND is_verified = 0 
                   AND expires_at >= GETUTCDATE()
+                  AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
+                    OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
+                    OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))
                 ORDER BY created_at DESC";
 
-            var otpId = await conn.QuerySingleOrDefaultAsync<string>(sql, new { Phone = phone, OtpCode = otpCode, Purpose = purpose });
-            if (string.IsNullOrEmpty(otpId))
+            var result = await conn.QuerySingleOrDefaultAsync<dynamic>(sql, new { UserId = userId, Email = email, Phone = phone, OtpCode = otpCode, Purpose = purpose });
+            if (result == null)
             {
-                _logger.LogWarning("OTP verification failed for phone: {Phone}", phone);
+                _logger.LogWarning("OTP verification failed for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
                 return false;
             }
 
-            await conn.ExecuteAsync("UPDATE OtpVerification SET is_verified = 1 WHERE otp_id = @OtpId", new { OtpId = otpId });
-            _logger.LogInformation("OTP verified successfully for phone: {Phone}", phone);
+            string matchedOtpId = result.otp_id;
+            string? matchedUserId = result.user_id;
+
+            await conn.ExecuteAsync("UPDATE OtpVerification SET is_verified = 1 WHERE otp_id = @OtpId", new { OtpId = matchedOtpId });
+
+            // Activate user if associated with user_id
+            var targetUid = !string.IsNullOrEmpty(matchedUserId) ? matchedUserId : userId;
+            if (!string.IsNullOrEmpty(targetUid))
+            {
+                await conn.ExecuteAsync("UPDATE Users SET is_active = 1, updated_at = GETDATE() WHERE user_id = @UserId", new { UserId = targetUid });
+            }
+
+            _logger.LogInformation("OTP verified successfully for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
             return true;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error verifying OTP for phone: {Phone}", phone);
+            _logger.LogError(ex, "Error verifying OTP");
             throw;
         }
     }
@@ -153,15 +207,21 @@ public class AuthDataService : IAuthDataService
             var userId = Guid.NewGuid().ToString();
             var dietName = !string.IsNullOrWhiteSpace(dto.DietName) ? dto.DietName : dto.DietType.ToString();
             var avatarColor = !string.IsNullOrWhiteSpace(dto.AvatarColor) ? dto.AvatarColor : "#4F46E5";
+            var phone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : "N/A";
+            var username = !string.IsNullOrWhiteSpace(dto.Username) 
+                ? dto.Username 
+                : (!string.IsNullOrWhiteSpace(dto.Email) ? dto.Email.Split('@')[0] : phone);
 
             const string sql = @"
-                INSERT INTO Users (user_id, phone_number, full_name, password_hash, diet_type, diet_name, avatar_color, is_biometric_enabled, is_active, created_at, updated_at)
-                VALUES (@UserId, @PhoneNumber, @FullName, @PasswordHash, @DietType, @DietName, @AvatarColor, 0, 1, GETDATE(), GETDATE())";
+                INSERT INTO Users (user_id, phone_number, email, username, full_name, password_hash, diet_type, diet_name, avatar_color, is_biometric_enabled, is_active, created_at, updated_at)
+                VALUES (@UserId, @PhoneNumber, @Email, @Username, @FullName, @PasswordHash, @DietType, @DietName, @AvatarColor, 0, 1, GETDATE(), GETDATE())";
 
             await conn.ExecuteAsync(sql, new
             {
                 UserId = userId,
-                PhoneNumber = dto.Phone,
+                PhoneNumber = phone,
+                Email = dto.Email,
+                Username = username,
                 FullName = dto.FullName,
                 PasswordHash = passwordHash,
                 DietType = (int)dto.DietType,
@@ -169,12 +229,12 @@ public class AuthDataService : IAuthDataService
                 AvatarColor = avatarColor
             });
 
-            _logger.LogInformation("Created new user: {UserId}, Phone: {Phone}", userId, dto.Phone);
+            _logger.LogInformation("Created new user: {UserId}, Username: {Username}, Email: {Email}, Phone: {Phone}", userId, username, dto.Email, phone);
             return (await GetUserByIdAsync(userId))!;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating user for phone: {Phone}", dto.Phone);
+            _logger.LogError(ex, "Error creating user for identifier: {Phone}", dto.Phone);
             throw;
         }
     }

@@ -98,6 +98,7 @@ builder.Services.AddScoped<IActivityLogDataService, ActivityLogDataService>();
 builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
+builder.Services.AddScoped<IEmailService, EmailService>();
 
 // 6. JWT Authentication Configuration
 var jwtKey = builder.Configuration["JwtSettings:SecretKey"] 

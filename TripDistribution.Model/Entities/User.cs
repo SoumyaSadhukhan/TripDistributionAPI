@@ -6,6 +6,8 @@ public class User
 {
     public string UserId { get; set; } = string.Empty;
     public string PhoneNumber { get; set; } = string.Empty;
+    public string? Email { get; set; }
+    public string? Username { get; set; }
     public string? FullName { get; set; }
     public string? PasswordHash { get; set; }
     public string? AuthToken { get; set; }

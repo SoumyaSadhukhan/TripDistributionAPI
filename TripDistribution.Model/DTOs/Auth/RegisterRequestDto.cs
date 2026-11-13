@@ -5,6 +5,8 @@ namespace TripDistribution.Model.DTOs.Auth;
 public class RegisterRequestDto
 {
     public string Phone { get; set; } = string.Empty;
+    public string? Email { get; set; }
+    public string? Username { get; set; }
     public string FullName { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
     public DietType DietType { get; set; } = DietType.Vegetarian;

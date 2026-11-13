@@ -9,6 +9,8 @@ BEGIN
     CREATE TABLE [Users] (
         [user_id] nvarchar(100) NOT NULL,
         [phone_number] nvarchar(20) NOT NULL,
+        [email] nvarchar(255) NULL,
+        [username] nvarchar(100) NULL,
         [full_name] nvarchar(150) NULL,
         [password_hash] nvarchar(255) NULL,
         [auth_token] nvarchar(MAX) NULL,
@@ -30,7 +32,9 @@ IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'OtpVerification')
 BEGIN
     CREATE TABLE [OtpVerification] (
         [otp_id] nvarchar(100) NOT NULL,
-        [phone_number] nvarchar(20) NOT NULL,
+        [user_id] nvarchar(100) NULL,
+        [phone_number] nvarchar(50) NULL,
+        [email] nvarchar(255) NULL,
         [otp_code] nvarchar(10) NOT NULL,
         [purpose] nvarchar(50) NULL,
         [is_verified] bit NULL,
