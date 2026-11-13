@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using TripDistribution.Api.Middleware;
@@ -86,6 +88,7 @@ builder.Services.AddScoped<INotificationDataService, NotificationDataService>();
 builder.Services.AddScoped<IActivityLogDataService, ActivityLogDataService>();
 
 // 5. Auth & User Services
+builder.Services.AddScoped<IPasswordHasher, PasswordHasher>();
 builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
 
@@ -119,7 +122,19 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 
-// 7. CORS Configuration
+// 7. Rate Limiter (Protection against Brute-Force & Denial of Service)
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("auth-policy", opt =>
+    {
+        opt.PermitLimit = 15;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueLimit = 0;
+    });
+});
+
+// 8. CORS Configuration
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowAll", policy =>
@@ -145,10 +160,11 @@ app.UseSwaggerUI(c =>
 
 app.UseCors("AllowAll");
 
+app.UseRateLimiter();
+
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 
 app.Run();
-

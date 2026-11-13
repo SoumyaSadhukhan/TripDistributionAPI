@@ -15,6 +15,7 @@ public interface IJwtTokenService
 
 public class JwtTokenService : IJwtTokenService
 {
+    private const string DefaultSecretKey = "SplitBillSuperSecretKey_ForTripDistribution_ProductionReady_2026_Key_MustBeLongEnough!";
     private readonly IConfiguration _configuration;
 
     public JwtTokenService(IConfiguration configuration)
@@ -22,12 +23,14 @@ public class JwtTokenService : IJwtTokenService
         _configuration = configuration;
     }
 
+    private string GetSecretKey() => _configuration["JwtSettings:SecretKey"] ?? DefaultSecretKey;
+
     public (string Token, DateTime ExpiresAt) GenerateToken(User user)
     {
-        var secretKey = _configuration["JwtSettings:SecretKey"];
+        var secretKey = GetSecretKey();
         var issuer = _configuration["JwtSettings:Issuer"] ?? "TripDistribution.Api";
         var audience = _configuration["JwtSettings:Audience"] ?? "TripDistribution.Client";
-        var expiryMinutes = int.TryParse(_configuration["JwtSettings:ExpiryInMinutes"], out var mins) ? mins : 43200; // 30 days
+        var expiryMinutes = int.TryParse(_configuration["JwtSettings:ExpiryInMinutes"], out var mins) ? mins : 1440; // 24 hours
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey));
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
@@ -61,8 +64,7 @@ public class JwtTokenService : IJwtTokenService
 
     public ClaimsPrincipal? ValidateToken(string token)
     {
-        var secretKey = _configuration["JwtSettings:SecretKey"] 
-            ?? "SplitBillSuperSecretKey_ForTripDistribution_ProductionReady_2026_Key_MustBeLongEnough!";
+        var secretKey = GetSecretKey();
         var issuer = _configuration["JwtSettings:Issuer"] ?? "TripDistribution.Api";
         var audience = _configuration["JwtSettings:Audience"] ?? "TripDistribution.Client";
 

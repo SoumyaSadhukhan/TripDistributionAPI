@@ -12,8 +12,8 @@ public interface IFriendDataService
     Task<IEnumerable<ContactMatchResultDto>> CheckContactsAsync(List<string> contacts);
     Task<IEnumerable<FriendDto>> GetFriendsAsync(string userId, string? userPhone);
     Task<FriendDto> AddOrInviteFriendAsync(string currentUserId, string? currentUserPhone, FriendInviteDto dto);
-    Task<bool> UpdateFriendStatusAsync(string connectionId, string status);
-    Task<bool> DeleteFriendAsync(string connectionId);
+    Task<bool> UpdateFriendStatusAsync(string connectionId, string userId, string status);
+    Task<bool> DeleteFriendAsync(string connectionId, string userId);
 }
 
 public class FriendDataService : IFriendDataService
@@ -148,14 +148,16 @@ public class FriendDataService : IFriendDataService
         }
     }
 
-    public async Task<bool> UpdateFriendStatusAsync(string connectionId, string status)
+    public async Task<bool> UpdateFriendStatusAsync(string connectionId, string userId, string status)
     {
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             var rows = await conn.ExecuteAsync(
-                "UPDATE FriendConnections SET status = @Status WHERE connection_id = @ConnectionId",
-                new { ConnectionId = connectionId, Status = status.ToUpper() });
+                @"UPDATE FriendConnections SET status = @Status 
+                  WHERE connection_id = @ConnectionId 
+                    AND (user_id = @UserId OR friend_user_id = @UserId OR receiver_id = @UserId)",
+                new { ConnectionId = connectionId, UserId = userId, Status = status.ToUpper() });
 
             _logger.LogInformation("Friend connection {ConnectionId} status updated to {Status}", connectionId, status);
             return rows > 0;
@@ -167,14 +169,16 @@ public class FriendDataService : IFriendDataService
         }
     }
 
-    public async Task<bool> DeleteFriendAsync(string connectionId)
+    public async Task<bool> DeleteFriendAsync(string connectionId, string userId)
     {
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             var rows = await conn.ExecuteAsync(
-                "DELETE FROM FriendConnections WHERE connection_id = @ConnectionId",
-                new { ConnectionId = connectionId });
+                @"DELETE FROM FriendConnections 
+                  WHERE connection_id = @ConnectionId 
+                    AND (user_id = @UserId OR friend_user_id = @UserId OR receiver_id = @UserId)",
+                new { ConnectionId = connectionId, UserId = userId });
 
             _logger.LogInformation("Friend connection {ConnectionId} deleted", connectionId);
             return rows > 0;

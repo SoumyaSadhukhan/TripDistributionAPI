@@ -9,6 +9,7 @@ namespace TripDistribution.Data.Services;
 public interface IGroupDataService
 {
     Task<IEnumerable<GroupDto>> GetGroupsByTripAsync(string tripId);
+    Task<GroupDto?> GetGroupByIdAsync(string groupId);
     Task<Group> CreateGroupAsync(CreateGroupDto dto);
     Task<bool> UpdateGroupAsync(string groupId, string name);
     Task<bool> DeleteGroupAsync(string groupId);
@@ -41,6 +42,25 @@ public class GroupDataService : IGroupDataService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting groups for trip: {TripId}", tripId);
+            throw;
+        }
+    }
+
+    public async Task<GroupDto?> GetGroupByIdAsync(string groupId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                SELECT group_id AS GroupId, trip_id AS TripId, name AS Name, created_at AS CreatedAt
+                FROM Groups 
+                WHERE group_id = @GroupId";
+
+            return await conn.QuerySingleOrDefaultAsync<GroupDto>(sql, new { GroupId = groupId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting group by ID: {GroupId}", groupId);
             throw;
         }
     }

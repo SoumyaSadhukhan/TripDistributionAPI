@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Logging;
 using TripDistribution.Api.Services;
 using TripDistribution.Data.Services;
@@ -13,12 +14,15 @@ namespace TripDistribution.Api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[EnableRateLimiting("auth-policy")]
 public class AuthController : ControllerBase
 {
     private readonly IAuthDataService _authDataService;
     private readonly IUserDataService _userDataService;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly ICurrentUserContext _currentUserContext;
+    private readonly IPasswordHasher _passwordHasher;
+    private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
 
     public AuthController(
@@ -26,20 +30,17 @@ public class AuthController : ControllerBase
         IUserDataService userDataService,
         IJwtTokenService jwtTokenService,
         ICurrentUserContext currentUserContext,
+        IPasswordHasher passwordHasher,
+        IConfiguration configuration,
         ILogger<AuthController> logger)
     {
         _authDataService = authDataService;
         _userDataService = userDataService;
         _jwtTokenService = jwtTokenService;
         _currentUserContext = currentUserContext;
+        _passwordHasher = passwordHasher;
+        _configuration = configuration;
         _logger = logger;
-    }
-
-    private static string HashPassword(string password)
-    {
-        using var sha256 = SHA256.Create();
-        var bytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(password));
-        return Convert.ToHexString(bytes).ToLower();
     }
 
     [HttpPost("send-otp")]
@@ -65,14 +66,23 @@ public class AuthController : ControllerBase
                     return NotFound(ApiResponse.Fail("No account found with this phone number."));
             }
 
-            var otpCode = Random.Shared.Next(100000, 999999).ToString();
+            // Cryptographically secure 6-digit OTP
+            var otpCode = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
             var saved = await _authDataService.SaveOtpAsync(dto.Phone, otpCode, dto.Purpose.ToUpper());
 
             if (!saved)
                 return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
 
             _logger.LogInformation("OTP dispatched for phone: {Phone}, purpose: {Purpose}", dto.Phone, dto.Purpose);
-            return Ok(ApiResponse<object>.Ok(new { Phone = dto.Phone, OtpCode = otpCode, Message = "OTP sent successfully." }));
+
+            // In production, OTP is delivered strictly via SMS/Gateway. Never expose in response unless explicitly allowed in development config.
+            bool exposeOtp = _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
+            if (exposeOtp)
+            {
+                return Ok(ApiResponse<object>.Ok(new { Phone = dto.Phone, OtpCode = otpCode, Message = "OTP sent successfully." }));
+            }
+
+            return Ok(ApiResponse<object>.Ok(new { Phone = dto.Phone, Message = "OTP sent successfully." }));
         }
         catch (Exception ex)
         {
@@ -113,17 +123,17 @@ public class AuthController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.Password))
                 return BadRequest(ApiResponse.Fail("Phone and password are required."));
 
+            if (dto.Password.Length < 6)
+                return BadRequest(ApiResponse.Fail("Password must be at least 6 characters long."));
 
             var existing = await _authDataService.GetUserByPhoneAsync(dto.Phone);
             if (existing != null)
                 return BadRequest(ApiResponse.Fail("User with this phone number already exists."));
 
-            var passwordHash = HashPassword(dto.Password);
-
-            // have to make in same transaction create user + generate toke + save token
+            // Secure PBKDF2 with Salt
+            var passwordHash = _passwordHasher.HashPassword(dto.Password);
 
             var user = await _authDataService.CreateUserAsync(dto, passwordHash);
-
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
 
             await _authDataService.SaveUserTokenAsync(new UserToken
@@ -177,11 +187,19 @@ public class AuthController : ControllerBase
                 return Unauthorized(ApiResponse.Fail("Invalid phone number or password."));
             }
 
-            var passwordHash = HashPassword(dto.Password);
-            if (user.PasswordHash != passwordHash)
+            // Verify password using PBKDF2 (with backward-compatibility for legacy SHA-256)
+            if (string.IsNullOrEmpty(user.PasswordHash) || !_passwordHasher.VerifyPassword(dto.Password, user.PasswordHash))
             {
                 _logger.LogWarning("Invalid password attempt for phone: {Phone}", dto.Phone);
                 return Unauthorized(ApiResponse.Fail("Invalid phone number or password."));
+            }
+
+            // Automatic hash upgrade: if user was stored with legacy SHA-256, upgrade to PBKDF2
+            if (!user.PasswordHash.StartsWith("$pbkdf2$"))
+            {
+                var newSaltedHash = _passwordHasher.HashPassword(dto.Password);
+                await _authDataService.UpdatePasswordAsync(user.PhoneNumber, newSaltedHash);
+                _logger.LogInformation("Upgraded password hash to PBKDF2 for user {UserId}", user.UserId);
             }
 
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
@@ -286,11 +304,14 @@ public class AuthController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.OtpCode) || string.IsNullOrWhiteSpace(dto.NewPassword))
                 return BadRequest(ApiResponse.Fail("Phone, OTP code, and new password are required."));
 
+            if (dto.NewPassword.Length < 6)
+                return BadRequest(ApiResponse.Fail("New password must be at least 6 characters long."));
+
             var isVerified = await _authDataService.VerifyOtpAsync(dto.Phone, dto.OtpCode, "FORGOT_PASSWORD");
             if (!isVerified)
                 return BadRequest(ApiResponse.Fail("Invalid or expired OTP verification code."));
 
-            var newHash = HashPassword(dto.NewPassword);
+            var newHash = _passwordHasher.HashPassword(dto.NewPassword);
             var updated = await _authDataService.UpdatePasswordAsync(dto.Phone, newHash);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Failed to update password. User not found."));
@@ -371,7 +392,7 @@ public class AuthController : ControllerBase
         }
     }
 
-        [HttpPost("verify-token")]
+    [HttpPost("verify-token")]
     [AllowAnonymous]
     public async Task<IActionResult> VerifyToken([FromBody] TripDistribution.Model.DTOs.Auth.VerifyTokenDto dto)
     {
@@ -439,5 +460,3 @@ public class AuthController : ControllerBase
         }
     }
 }
-
-

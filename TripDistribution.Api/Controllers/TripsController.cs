@@ -56,9 +56,15 @@ public class TripsController : ControllerBase
     {
         try
         {
-            var userId = _currentUserContext.UserId ?? "";
-            var trip = await _tripDataService.GetTripDetailAsync(id, userId);
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
 
+            // Enforce BOLA authorization check
+            if (!await _tripDataService.HasUserTripAccessAsync(id, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this trip."));
+
+            var trip = await _tripDataService.GetTripDetailAsync(id, userId);
             if (trip == null)
                 return NotFound(ApiResponse.Fail("Trip not found."));
 
@@ -117,11 +123,26 @@ public class TripsController : ControllerBase
     [HttpPost("sync")]
     public async Task<IActionResult> SyncTrips([FromBody] SyncTripsDto dto)
     {
-        // Full offline sync logic can be implemented here.
-        // For now, return success so the Flutter app can proceed.
-        var jsonString = System.Text.Json.JsonSerializer.Serialize(dto.Trips);
-        await _tripDataService.SyncTripsAsync(dto.UserId, jsonString);
-        return Ok(new { success = true, message = "Trips synchronized." });
+        try
+        {
+            var currentUserId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(currentUserId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            // Use verified JWT user identity instead of client-provided userId
+            var jsonString = System.Text.Json.JsonSerializer.Serialize(dto.Trips);
+            var success = await _tripDataService.SyncTripsAsync(currentUserId, jsonString);
+
+            if (!success)
+                return StatusCode(500, ApiResponse.Fail("Failed to synchronize trips."));
+
+            return Ok(new { success = true, message = "Trips synchronized successfully." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in SyncTrips for user: {UserId}", _currentUserContext.UserId);
+            return StatusCode(500, ApiResponse.Fail("Failed to synchronize trips."));
+        }
     }
 
     [HttpPut("{id}")]
@@ -129,14 +150,22 @@ public class TripsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             if (string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(ApiResponse.Fail("Trip name is required."));
+
+            // Verify permission (Owner, Admin or Editor)
+            if (!await _tripDataService.CanUserManageTripAsync(id, userId))
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to modify this trip."));
 
             var updated = await _tripDataService.UpdateTripAsync(id, dto);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Trip not found or could not be updated."));
 
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, id, "UPDATE_TRIP", $"Updated trip info '{dto.Name}'");
+            await _activityLogDataService.LogActivityAsync(userId, id, "UPDATE_TRIP", $"Updated trip info '{dto.Name}'");
             _logger.LogInformation("Trip {TripId} updated", id);
 
             return Ok(ApiResponse.Ok("Trip updated successfully."));
@@ -153,11 +182,19 @@ public class TripsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            // Only Trip Owner can delete the trip
+            if (!await _tripDataService.IsTripOwnerAsync(id, userId))
+                return StatusCode(403, ApiResponse.Fail("Only the trip owner can delete this trip."));
+
             var deleted = await _tripDataService.DeleteTripAsync(id);
             if (!deleted)
                 return NotFound(ApiResponse.Fail("Trip not found."));
 
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, id, "DELETE_TRIP", $"Deleted trip {id}");
+            await _activityLogDataService.LogActivityAsync(userId, id, "DELETE_TRIP", $"Deleted trip {id}");
             _logger.LogInformation("Trip {TripId} deleted", id);
 
             return Ok(ApiResponse.Ok("Trip and all associated records deleted successfully."));
@@ -169,6 +206,3 @@ public class TripsController : ControllerBase
         }
     }
 }
-
-
-

@@ -18,8 +18,10 @@ public interface ITripDataService
     Task<Trip> CreateTripAsync(string userId, string? userPhone, string? userName, DietType dietType, string? dietName, CreateTripDto dto);
     Task<bool> UpdateTripAsync(string tripId, UpdateTripDto dto);
     Task<bool> DeleteTripAsync(string tripId);
-      Task<bool> SyncTripsAsync(string userId, string jsonTrips);
-      
+    Task<bool> SyncTripsAsync(string userId, string jsonTrips);
+    Task<bool> HasUserTripAccessAsync(string tripId, string userId, string? phone = null);
+    Task<bool> CanUserManageTripAsync(string tripId, string userId);
+    Task<bool> IsTripOwnerAsync(string tripId, string userId);
 }
 
 public class TripDataService : ITripDataService
@@ -42,55 +44,47 @@ public class TripDataService : ITripDataService
             var last10 = cleanPhone.Length >= 10 ? cleanPhone[^10..] : cleanPhone;
 
             const string sql = @"
-                SELECT DISTINCT t.trip_id AS TripId, t.user_id AS UserId, t.name AS Name, 
+                WITH ExpSummary AS (
+                    SELECT trip_id, SUM(amount) AS TotalExpenses
+                    FROM Expenses
+                    GROUP BY trip_id
+                ),
+                MemberSummary AS (
+                    SELECT trip_id, COUNT(DISTINCT person_id) AS MemberCount
+                    FROM Persons
+                    GROUP BY trip_id
+                ),
+                MyPersonSummary AS (
+                    SELECT trip_id, paid_amount, owed_amount, balance,
+                           ROW_NUMBER() OVER (PARTITION BY trip_id ORDER BY created_at ASC) as rn
+                    FROM Persons
+                    WHERE user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10)
+                )
+                SELECT DISTINCT 
+                       t.trip_id AS TripId, t.user_id AS UserId, t.name AS Name, 
                        t.description AS Description, t.currency_code AS CurrencyCode,
                        t.created_at AS CreatedAt, t.updated_at AS UpdatedAt,
                        CASE WHEN t.user_id = @UserId THEN 1 ELSE 0 END AS IsOwner,
-                       COALESCE(tc.role, CASE WHEN t.user_id = @UserId THEN 'OWNER' ELSE 'MEMBER' END) AS Role
+                       COALESCE(tc.role, CASE WHEN t.user_id = @UserId THEN 'OWNER' ELSE 'MEMBER' END) AS Role,
+                       ISNULL(ms.MemberCount, 0) AS MemberCount,
+                       ISNULL(es.TotalExpenses, 0.00) AS TotalExpenses,
+                       ISNULL(mps.paid_amount, 0.00) AS MyPaidAmount,
+                       ISNULL(mps.owed_amount, 0.00) AS MyOwedAmount,
+                       ISNULL(mps.balance, 0.00) AS MyBalance
                 FROM Trips t
                 LEFT JOIN Persons p ON t.trip_id = p.trip_id
                 LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id AND (tc.user_id = @UserId OR (@Last10 <> '' AND RIGHT(tc.phone_number, 10) = @Last10))
+                LEFT JOIN MemberSummary ms ON t.trip_id = ms.trip_id
+                LEFT JOIN ExpSummary es ON t.trip_id = es.trip_id
+                LEFT JOIN MyPersonSummary mps ON t.trip_id = mps.trip_id AND mps.rn = 1
                 WHERE t.user_id = @UserId 
                    OR p.user_id = @UserId 
                    OR tc.user_id = @UserId
                    OR (@Last10 <> '' AND (RIGHT(p.phone_number, 10) = @Last10 OR RIGHT(tc.phone_number, 10) = @Last10))
                 ORDER BY t.created_at DESC";
 
-            var trips = (await conn.QueryAsync<TripSummaryDto>(sql, new { UserId = userId, Last10 = last10 })).ToList();
-            if (trips.Count == 0) return trips;
-
-            foreach (var t in trips)
-            {
-                var stats = await conn.QuerySingleOrDefaultAsync<dynamic>(@"
-                    SELECT 
-                        COUNT(DISTINCT p.person_id) AS MemberCount,
-                        ISNULL(SUM(e.amount), 0) AS TotalExpenses
-                    FROM Trips tr
-                    LEFT JOIN Persons p ON tr.trip_id = p.trip_id
-                    LEFT JOIN Expenses e ON tr.trip_id = e.trip_id
-                    WHERE tr.trip_id = @TripId", new { t.TripId });
-
-                if (stats != null)
-                {
-                    t.MemberCount = (int)(stats.MemberCount ?? 0);
-                    t.TotalExpenses = (decimal)(stats.TotalExpenses ?? 0.00m);
-                }
-
-                var myPerson = await conn.QuerySingleOrDefaultAsync<dynamic>(@"
-                    SELECT TOP 1 paid_amount, owed_amount, balance
-                    FROM Persons
-                    WHERE trip_id = @TripId AND (user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10))",
-                    new { t.TripId, UserId = userId, Last10 = last10 });
-
-                if (myPerson != null)
-                {
-                    t.MyPaidAmount = (decimal)(myPerson.paid_amount ?? 0.00m);
-                    t.MyOwedAmount = (decimal)(myPerson.owed_amount ?? 0.00m);
-                    t.MyBalance = (decimal)(myPerson.balance ?? 0.00m);
-                }
-            }
-
-            return trips;
+            var trips = await conn.QueryAsync<TripSummaryDto>(sql, new { UserId = userId, Last10 = last10 });
+            return trips.ToList();
         }
         catch (Exception ex)
         {
@@ -200,50 +194,61 @@ public class TripDataService : ITripDataService
             var dName = !string.IsNullOrWhiteSpace(dietName) ? dietName : dietType.ToString();
             var pName = !string.IsNullOrWhiteSpace(userName) ? userName : "Me";
 
-            const string insertTrip = @"
-                INSERT INTO Trips (trip_id, user_id, name, description, currency_code, created_at, updated_at)
-                VALUES (@TripId, @UserId, @Name, @Description, @CurrencyCode, GETDATE(), GETDATE())";
-
-            await conn.ExecuteAsync(insertTrip, new
+            using var trans = conn.BeginTransaction();
+            try
             {
-                TripId = tripId,
-                UserId = userId,
-                Name = dto.Name,
-                Description = dto.Description,
-                CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR"
-            });
+                const string insertTrip = @"
+                    INSERT INTO Trips (trip_id, user_id, name, description, currency_code, created_at, updated_at)
+                    VALUES (@TripId, @UserId, @Name, @Description, @CurrencyCode, GETDATE(), GETDATE())";
 
-            await conn.ExecuteAsync(@"
-                INSERT INTO Groups (group_id, trip_id, name, created_at)
-                VALUES (@GroupId, @TripId, 'General', GETDATE())",
-                new { GroupId = groupId, TripId = tripId });
-
-            await conn.ExecuteAsync(@"
-                INSERT INTO Persons (person_id, group_id, trip_id, user_id, phone_number, name, diet_type, diet_name, paid_amount, owed_amount, balance, created_at)
-                VALUES (@PersonId, @GroupId, @TripId, @UserId, @Phone, @Name, @DietType, @DietName, 0.00, 0.00, 0.00, GETDATE())",
-                new
+                await conn.ExecuteAsync(insertTrip, new
                 {
-                    PersonId = personId,
-                    GroupId = groupId,
                     TripId = tripId,
                     UserId = userId,
-                    Phone = userPhone,
-                    Name = pName,
-                    DietType = (int)dietType,
-                    DietName = dName
-                });
+                    Name = dto.Name,
+                    Description = dto.Description,
+                    CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR"
+                }, trans);
 
-            await conn.ExecuteAsync(@"
-                INSERT INTO TripCollaborators (collab_id, trip_id, user_id, person_id, phone_number, role, status, joined_at)
-                VALUES (@CollabId, @TripId, @UserId, @PersonId, @Phone, 'OWNER', 'ACCEPTED', GETDATE())",
-                new
-                {
-                    CollabId = collabId,
-                    TripId = tripId,
-                    UserId = userId,
-                    PersonId = personId,
-                    Phone = userPhone
-                });
+                await conn.ExecuteAsync(@"
+                    INSERT INTO Groups (group_id, trip_id, name, created_at)
+                    VALUES (@GroupId, @TripId, 'General', GETDATE())",
+                    new { GroupId = groupId, TripId = tripId }, trans);
+
+                await conn.ExecuteAsync(@"
+                    INSERT INTO Persons (person_id, group_id, trip_id, user_id, phone_number, name, diet_type, diet_name, paid_amount, owed_amount, balance, created_at)
+                    VALUES (@PersonId, @GroupId, @TripId, @UserId, @Phone, @Name, @DietType, @DietName, 0.00, 0.00, 0.00, GETDATE())",
+                    new
+                    {
+                        PersonId = personId,
+                        GroupId = groupId,
+                        TripId = tripId,
+                        UserId = userId,
+                        Phone = userPhone,
+                        Name = pName,
+                        DietType = (int)dietType,
+                        DietName = dName
+                    }, trans);
+
+                await conn.ExecuteAsync(@"
+                    INSERT INTO TripCollaborators (collab_id, trip_id, user_id, person_id, phone_number, role, status, joined_at)
+                    VALUES (@CollabId, @TripId, @UserId, @PersonId, @Phone, 'OWNER', 'ACCEPTED', GETDATE())",
+                    new
+                    {
+                        CollabId = collabId,
+                        TripId = tripId,
+                        UserId = userId,
+                        PersonId = personId,
+                        Phone = userPhone
+                    }, trans);
+
+                trans.Commit();
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
+            }
 
             _logger.LogInformation("Trip {TripId} created by user {UserId}", tripId, userId);
 
@@ -293,12 +298,12 @@ public class TripDataService : ITripDataService
         }
     }
 
-                  public async Task<bool> SyncTripsAsync(string userId, string jsonTrips)
+    public async Task<bool> SyncTripsAsync(string userId, string jsonTrips)
+    {
+        try
         {
-            try
-            {
-                using var conn = await _connectionFactory.CreateConnectionAsync();
-                const string sql = @"
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
 BEGIN TRY
     BEGIN TRANSACTION;
 
@@ -434,21 +439,20 @@ BEGIN CATCH
     IF @@TRANCOUNT > 0
         ROLLBACK TRANSACTION;
     THROW;
-END CATCH;
-                ";
+END CATCH;";
 
-                await conn.ExecuteAsync(sql, new { UserId = userId, Json = jsonTrips });
-                _logger.LogInformation("Synced trips for user {UserId}", userId);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Exception in SyncTripsAsync for user: {UserId}", userId);
-                return false;
-            }
+            await conn.ExecuteAsync(sql, new { UserId = userId, Json = jsonTrips });
+            _logger.LogInformation("Synced trips for user {UserId}", userId);
+            return true;
         }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in SyncTripsAsync for user: {UserId}", userId);
+            return false;
+        }
+    }
 
-        public async Task<bool> DeleteTripAsync(string tripId)
+    public async Task<bool> DeleteTripAsync(string tripId)
     {
         try
         {
@@ -473,11 +477,71 @@ END CATCH;
             throw;
         }
     }
+
+    public async Task<bool> HasUserTripAccessAsync(string tripId, string userId, string? phone = null)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            var cleanPhone = !string.IsNullOrWhiteSpace(phone) ? phone.Replace(" ", "").Trim() : "";
+            var last10 = cleanPhone.Length >= 10 ? cleanPhone[^10..] : cleanPhone;
+
+            const string sql = @"
+                SELECT COUNT(1)
+                FROM Trips t
+                LEFT JOIN Persons p ON t.trip_id = p.trip_id
+                LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id
+                WHERE t.trip_id = @TripId 
+                  AND (t.user_id = @UserId 
+                       OR p.user_id = @UserId 
+                       OR tc.user_id = @UserId 
+                       OR (@Last10 <> '' AND (RIGHT(p.phone_number, 10) = @Last10 OR RIGHT(tc.phone_number, 10) = @Last10)))";
+
+            var count = await conn.ExecuteScalarAsync<int>(sql, new { TripId = tripId, UserId = userId, Last10 = last10 });
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking trip access for trip: {TripId}, user: {UserId}", tripId, userId);
+            return false;
+        }
+    }
+
+    public async Task<bool> CanUserManageTripAsync(string tripId, string userId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                SELECT COUNT(1)
+                FROM Trips t
+                LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id AND tc.user_id = @UserId
+                WHERE t.trip_id = @TripId 
+                  AND (t.user_id = @UserId OR tc.role IN ('OWNER', 'ADMIN', 'EDITOR'))";
+
+            var count = await conn.ExecuteScalarAsync<int>(sql, new { TripId = tripId, UserId = userId });
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking manage access for trip: {TripId}, user: {UserId}", tripId, userId);
+            return false;
+        }
+    }
+
+    public async Task<bool> IsTripOwnerAsync(string tripId, string userId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = "SELECT COUNT(1) FROM Trips WHERE trip_id = @TripId AND user_id = @UserId";
+            var count = await conn.ExecuteScalarAsync<int>(sql, new { TripId = tripId, UserId = userId });
+            return count > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error checking trip ownership for trip: {TripId}, user: {UserId}", tripId, userId);
+            return false;
+        }
+    }
 }
-
-
-
-
-
-
-

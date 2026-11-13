@@ -15,6 +15,7 @@ namespace TripDistribution.Api.Controllers;
 public class SettlementsController : ControllerBase
 {
     private readonly ISettlementDataService _settlementDataService;
+    private readonly ITripDataService _tripDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly INotificationDataService _notificationDataService;
@@ -23,6 +24,7 @@ public class SettlementsController : ControllerBase
 
     public SettlementsController(
         ISettlementDataService settlementDataService,
+        ITripDataService tripDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         INotificationDataService notificationDataService,
@@ -30,6 +32,7 @@ public class SettlementsController : ControllerBase
         ILogger<SettlementsController> logger)
     {
         _settlementDataService = settlementDataService;
+        _tripDataService = tripDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _notificationDataService = notificationDataService;
@@ -42,6 +45,13 @@ public class SettlementsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(tripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this trip's settlements."));
+
             var settlements = await _settlementDataService.GetSettlementsByTripAsync(tripId);
             return Ok(ApiResponse<IEnumerable<SettlementDto>>.Ok(settlements));
         }
@@ -57,9 +67,16 @@ public class SettlementsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             var settlement = await _settlementDataService.GetSettlementByIdAsync(id);
             if (settlement == null)
                 return NotFound(ApiResponse.Fail("Settlement not found."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(settlement.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this settlement."));
 
             return Ok(ApiResponse<SettlementDto>.Ok(settlement));
         }
@@ -75,11 +92,20 @@ public class SettlementsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             if (string.IsNullOrWhiteSpace(dto.TripId) || string.IsNullOrWhiteSpace(dto.FromPersonId) || string.IsNullOrWhiteSpace(dto.ToPersonId) || dto.Amount <= 0)
                 return BadRequest(ApiResponse.Fail("TripId, FromPersonId, ToPersonId, and valid Amount (> 0) are required."));
 
-            var userId = _currentUserContext.UserId;
-            var settlement = await _settlementDataService.ProposeSettlementAsync(userId ?? "", dto);
+            if (dto.FromPersonId == dto.ToPersonId)
+                return BadRequest(ApiResponse.Fail("FromPersonId and ToPersonId cannot be the same."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(dto.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to record settlements for this trip."));
+
+            var settlement = await _settlementDataService.ProposeSettlementAsync(userId, dto);
 
             await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "SETTLE_DEBT", $"{settlement.FromPersonName} paid {settlement.ToPersonName} {dto.Amount:N2}");
             _logger.LogInformation("Settlement {SettlementId} recorded for trip {TripId}", settlement.SettlementId, dto.TripId);
@@ -112,15 +138,26 @@ public class SettlementsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var settlement = await _settlementDataService.GetSettlementByIdAsync(id);
+            if (settlement == null)
+                return NotFound(ApiResponse.Fail("Settlement not found."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(settlement.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to update this settlement."));
+
             var updated = await _settlementDataService.UpdateSettlementStatusAsync(id, dto.Status);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Settlement not found."));
 
-            var settlement = await _settlementDataService.GetSettlementByIdAsync(id);
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, settlement?.TripId, "SETTLEMENT_STATUS", $"Settlement status updated to '{dto.Status}'");
+            var updatedSettlement = await _settlementDataService.GetSettlementByIdAsync(id);
+            await _activityLogDataService.LogActivityAsync(userId, settlement.TripId, "SETTLEMENT_STATUS", $"Settlement status updated to '{dto.Status}'");
             _logger.LogInformation("Settlement {SettlementId} status updated to {Status}", id, dto.Status);
 
-            return Ok(ApiResponse<SettlementDto>.Ok(settlement!, "Settlement status updated."));
+            return Ok(ApiResponse<SettlementDto>.Ok(updatedSettlement!, "Settlement status updated."));
         }
         catch (Exception ex)
         {
@@ -134,15 +171,22 @@ public class SettlementsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             var existing = await _settlementDataService.GetSettlementByIdAsync(id);
             if (existing == null)
                 return NotFound(ApiResponse.Fail("Settlement not found."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(existing.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to delete this settlement."));
 
             var deleted = await _settlementDataService.DeleteSettlementAsync(id);
             if (!deleted)
                 return NotFound(ApiResponse.Fail("Settlement could not be deleted."));
 
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, existing.TripId, "DELETE_SETTLEMENT", $"Deleted settlement of {existing.Amount:N2}");
+            await _activityLogDataService.LogActivityAsync(userId, existing.TripId, "DELETE_SETTLEMENT", $"Deleted settlement of {existing.Amount:N2}");
             _logger.LogInformation("Settlement {SettlementId} deleted", id);
 
             return Ok(ApiResponse.Ok("Settlement deleted successfully."));

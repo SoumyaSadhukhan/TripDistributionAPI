@@ -108,9 +108,13 @@ public class FriendsController : ControllerBase
     {
         try
         {
-            var updated = await _friendDataService.UpdateFriendStatusAsync(id, dto.Status);
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var updated = await _friendDataService.UpdateFriendStatusAsync(id, userId, dto.Status);
             if (!updated)
-                return NotFound(ApiResponse.Fail("Friend connection not found."));
+                return NotFound(ApiResponse.Fail("Friend connection not found or unauthorized."));
 
             _logger.LogInformation("Friend connection {ConnectionId} status updated to {Status}", id, dto.Status);
             return Ok(ApiResponse.Ok("Friend connection status updated."));
@@ -127,9 +131,13 @@ public class FriendsController : ControllerBase
     {
         try
         {
-            var deleted = await _friendDataService.DeleteFriendAsync(id);
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var deleted = await _friendDataService.DeleteFriendAsync(id, userId);
             if (!deleted)
-                return NotFound(ApiResponse.Fail("Friend connection not found."));
+                return NotFound(ApiResponse.Fail("Friend connection not found or unauthorized."));
 
             _logger.LogInformation("Friend connection {ConnectionId} deleted", id);
             return Ok(ApiResponse.Ok("Friend connection removed."));

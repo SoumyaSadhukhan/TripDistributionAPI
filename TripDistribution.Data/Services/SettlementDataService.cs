@@ -123,7 +123,7 @@ public class SettlementDataService : ISettlementDataService
             var existing = await GetSettlementByIdAsync(settlementId);
             if (existing == null) return false;
 
-            var isCompleted = status.Equals("ACCEPTED", StringComparison.OrdinalIgnoreCase);
+            var isCompleted = status.Equals("ACCEPTED", StringComparison.OrdinalIgnoreCase) || status.Equals("COMPLETED", StringComparison.OrdinalIgnoreCase);
             const string sql = @"
                 UPDATE SettlementTransactions 
                 SET status = @Status, is_completed = @IsCompleted

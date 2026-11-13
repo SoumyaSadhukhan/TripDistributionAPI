@@ -15,17 +15,20 @@ namespace TripDistribution.Api.Controllers;
 public class GroupsController : ControllerBase
 {
     private readonly IGroupDataService _groupDataService;
+    private readonly ITripDataService _tripDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly ILogger<GroupsController> _logger;
 
     public GroupsController(
         IGroupDataService groupDataService,
+        ITripDataService tripDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         ILogger<GroupsController> logger)
     {
         _groupDataService = groupDataService;
+        _tripDataService = tripDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _logger = logger;
@@ -36,6 +39,14 @@ public class GroupsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var hasAccess = await _tripDataService.HasUserTripAccessAsync(tripId, userId);
+            if (!hasAccess)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to view groups for this trip."));
+
             var groups = await _groupDataService.GetGroupsByTripAsync(tripId);
             return Ok(ApiResponse<IEnumerable<GroupDto>>.Ok(groups));
         }
@@ -54,8 +65,16 @@ public class GroupsController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.TripId) || string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(ApiResponse.Fail("TripId and Name are required."));
 
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var canManage = await _tripDataService.CanUserManageTripAsync(dto.TripId, userId);
+            if (!canManage)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to create groups for this trip."));
+
             var group = await _groupDataService.CreateGroupAsync(dto);
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, dto.TripId, "CREATE_GROUP", $"Created group '{dto.Name}'");
+            await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "CREATE_GROUP", $"Created group '{dto.Name}'");
             _logger.LogInformation("Group {GroupId} '{Name}' created in trip {TripId}", group.GroupId, dto.Name, dto.TripId);
 
             return Ok(ApiResponse<Group>.Ok(group, "Group created successfully."));
@@ -74,6 +93,18 @@ public class GroupsController : ControllerBase
         {
             if (string.IsNullOrWhiteSpace(name))
                 return BadRequest(ApiResponse.Fail("Group name is required."));
+
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var existing = await _groupDataService.GetGroupByIdAsync(id);
+            if (existing == null)
+                return NotFound(ApiResponse.Fail("Group not found."));
+
+            var canManage = await _tripDataService.CanUserManageTripAsync(existing.TripId, userId);
+            if (!canManage)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to modify groups for this trip."));
 
             var updated = await _groupDataService.UpdateGroupAsync(id, name);
             if (!updated)
@@ -94,6 +125,18 @@ public class GroupsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var existing = await _groupDataService.GetGroupByIdAsync(id);
+            if (existing == null)
+                return NotFound(ApiResponse.Fail("Group not found."));
+
+            var canManage = await _tripDataService.CanUserManageTripAsync(existing.TripId, userId);
+            if (!canManage)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to delete groups for this trip."));
+
             var deleted = await _groupDataService.DeleteGroupAsync(id);
             if (!deleted)
                 return NotFound(ApiResponse.Fail("Group not found."));

@@ -15,6 +15,7 @@ namespace TripDistribution.Api.Controllers;
 public class ExpensesController : ControllerBase
 {
     private readonly IExpenseDataService _expenseDataService;
+    private readonly ITripDataService _tripDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly INotificationDataService _notificationDataService;
@@ -23,6 +24,7 @@ public class ExpensesController : ControllerBase
 
     public ExpensesController(
         IExpenseDataService expenseDataService,
+        ITripDataService tripDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         INotificationDataService notificationDataService,
@@ -30,6 +32,7 @@ public class ExpensesController : ControllerBase
         ILogger<ExpensesController> logger)
     {
         _expenseDataService = expenseDataService;
+        _tripDataService = tripDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _notificationDataService = notificationDataService;
@@ -42,6 +45,13 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(tripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this trip's expenses."));
+
             var expenses = await _expenseDataService.GetExpensesByTripAsync(tripId);
             return Ok(ApiResponse<IEnumerable<ExpenseDetailDto>>.Ok(expenses));
         }
@@ -57,9 +67,16 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             var expense = await _expenseDataService.GetExpenseByIdAsync(id);
             if (expense == null)
                 return NotFound(ApiResponse.Fail("Expense not found."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(expense.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this expense."));
 
             return Ok(ApiResponse<ExpenseDetailDto>.Ok(expense));
         }
@@ -75,15 +92,21 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             if (string.IsNullOrWhiteSpace(dto.TripId) || string.IsNullOrWhiteSpace(dto.Description) || dto.Amount <= 0)
                 return BadRequest(ApiResponse.Fail("TripId, Description, and valid Amount (> 0) are required."));
 
             if (string.IsNullOrWhiteSpace(dto.PaidByPersonId))
                 return BadRequest(ApiResponse.Fail("PaidByPersonId is required."));
 
+            if (!await _tripDataService.HasUserTripAccessAsync(dto.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to add expenses to this trip."));
+
             var expense = await _expenseDataService.CreateExpenseAsync(dto);
 
-            var userId = _currentUserContext.UserId;
             await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "ADD_EXPENSE", $"Added expense '{dto.Description}' of {dto.CurrencyCode} {dto.Amount}");
             _logger.LogInformation("Expense {ExpenseId} created for trip {TripId}", expense.ExpenseId, dto.TripId);
 
@@ -119,15 +142,26 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             if (string.IsNullOrWhiteSpace(dto.Description) || dto.Amount <= 0)
                 return BadRequest(ApiResponse.Fail("Description and valid Amount (> 0) are required."));
 
-            var updated = await _expenseDataService.UpdateExpenseAsync(id, dto);
-            if (!updated)
+            var existing = await _expenseDataService.GetExpenseByIdAsync(id);
+            if (existing == null)
                 return NotFound(ApiResponse.Fail("Expense not found."));
 
+            if (!await _tripDataService.HasUserTripAccessAsync(existing.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to modify this expense."));
+
+            var updated = await _expenseDataService.UpdateExpenseAsync(id, dto);
+            if (!updated)
+                return NotFound(ApiResponse.Fail("Expense could not be updated."));
+
             var expense = await _expenseDataService.GetExpenseByIdAsync(id);
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, expense?.TripId, "UPDATE_EXPENSE", $"Updated expense '{dto.Description}'");
+            await _activityLogDataService.LogActivityAsync(userId, expense?.TripId, "UPDATE_EXPENSE", $"Updated expense '{dto.Description}'");
             _logger.LogInformation("Expense {ExpenseId} updated", id);
 
             return Ok(ApiResponse<ExpenseDetailDto>.Ok(expense!, "Expense updated successfully."));
@@ -144,15 +178,22 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
             var existing = await _expenseDataService.GetExpenseByIdAsync(id);
             if (existing == null)
                 return NotFound(ApiResponse.Fail("Expense not found."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(existing.TripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to delete this expense."));
 
             var deleted = await _expenseDataService.DeleteExpenseAsync(id);
             if (!deleted)
                 return NotFound(ApiResponse.Fail("Expense could not be deleted."));
 
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, existing.TripId, "DELETE_EXPENSE", $"Deleted expense '{existing.Description}'");
+            await _activityLogDataService.LogActivityAsync(userId, existing.TripId, "DELETE_EXPENSE", $"Deleted expense '{existing.Description}'");
             _logger.LogInformation("Expense {ExpenseId} deleted", id);
 
             return Ok(ApiResponse.Ok("Expense deleted successfully."));
@@ -169,6 +210,13 @@ public class ExpensesController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            if (!await _tripDataService.HasUserTripAccessAsync(tripId, userId, _currentUserContext.PhoneNumber))
+                return StatusCode(403, ApiResponse.Fail("You do not have access to this trip."));
+
             var splits = await _expenseDataService.CalculateDietarySplitsAsync(tripId, dto.TotalAmount, dto.CategoryIndex, dto.PersonIds);
             return Ok(ApiResponse<List<ExpenseSplitItemDto>>.Ok(splits));
         }

@@ -183,14 +183,24 @@ public class PersonDataService : IPersonDataService
             var person = await GetPersonByIdAsync(personId);
             if (person == null) return false;
 
-            await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE person_id = @PersonId", new { PersonId = personId });
-            await conn.ExecuteAsync("DELETE FROM SettlementTransactions WHERE from_person_id = @PersonId OR to_person_id = @PersonId", new { PersonId = personId });
-            await conn.ExecuteAsync("DELETE FROM TripCollaborators WHERE person_id = @PersonId", new { PersonId = personId });
-            var rows = await conn.ExecuteAsync("DELETE FROM Persons WHERE person_id = @PersonId", new { PersonId = personId });
+            using var trans = conn.BeginTransaction();
+            try
+            {
+                await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
+                await conn.ExecuteAsync("DELETE FROM SettlementTransactions WHERE from_person_id = @PersonId OR to_person_id = @PersonId", new { PersonId = personId }, transaction: trans);
+                await conn.ExecuteAsync("DELETE FROM TripCollaborators WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
+                var rows = await conn.ExecuteAsync("DELETE FROM Persons WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
+                trans.Commit();
 
-            _logger.LogInformation("Person {PersonId} deleted, recalculating balances for trip {TripId}", personId, person.TripId);
-            await RecalculateTripBalancesAsync(person.TripId);
-            return rows > 0;
+                _logger.LogInformation("Person {PersonId} deleted, recalculating balances for trip {TripId}", personId, person.TripId);
+                await RecalculateTripBalancesAsync(person.TripId);
+                return rows > 0;
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
+            }
         }
         catch (Exception ex)
         {
@@ -241,7 +251,7 @@ public class PersonDataService : IPersonDataService
                 INNER JOIN (
                     SELECT from_person_id, SUM(amount) AS TotalSettled
                     FROM SettlementTransactions
-                    WHERE trip_id = @TripId AND status = 'ACCEPTED' AND is_completed = 1
+                    WHERE trip_id = @TripId AND status IN ('ACCEPTED', 'COMPLETED') AND is_completed = 1
                     GROUP BY from_person_id
                 ) settleFrom ON p.person_id = settleFrom.from_person_id
                 WHERE p.trip_id = @TripId;
@@ -252,7 +262,7 @@ public class PersonDataService : IPersonDataService
                 INNER JOIN (
                     SELECT to_person_id, SUM(amount) AS TotalReceived
                     FROM SettlementTransactions
-                    WHERE trip_id = @TripId AND status = 'ACCEPTED' AND is_completed = 1
+                    WHERE trip_id = @TripId AND status IN ('ACCEPTED', 'COMPLETED') AND is_completed = 1
                     GROUP BY to_person_id
                 ) settleTo ON p.person_id = settleTo.to_person_id
                 WHERE p.trip_id = @TripId;

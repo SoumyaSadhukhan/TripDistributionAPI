@@ -146,36 +146,47 @@ public class ExpenseDataService : IExpenseDataService
                 INSERT INTO Expenses (expense_id, trip_id, description, amount, currency_code, category_index, category_name, paid_by_person_id, split_type, expense_date, created_at)
                 VALUES (@ExpenseId, @TripId, @Description, @Amount, @CurrencyCode, @CategoryIndex, @CategoryName, @PaidByPersonId, @SplitType, @ExpenseDate, GETDATE())";
 
-            await conn.ExecuteAsync(insertExpense, new
+            using var trans = conn.BeginTransaction();
+            try
             {
-                ExpenseId = expenseId,
-                dto.TripId,
-                dto.Description,
-                dto.Amount,
-                CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR",
-                dto.CategoryIndex,
-                CategoryName = !string.IsNullOrWhiteSpace(dto.CategoryName) ? dto.CategoryName : "General",
-                dto.PaidByPersonId,
-                SplitType = !string.IsNullOrWhiteSpace(dto.SplitType) ? dto.SplitType : "EQUAL",
-                ExpenseDate = expenseDate
-            });
-
-            if (splits.Count > 0)
-            {
-                const string insertSplit = @"
-                    INSERT INTO ExpenseSplits (split_id, expense_id, trip_id, person_id, amount, created_at)
-                    VALUES (@SplitId, @ExpenseId, @TripId, @PersonId, @Amount, GETDATE())";
-
-                var splitEntities = splits.Select(s => new
+                await conn.ExecuteAsync(insertExpense, new
                 {
-                    SplitId = Guid.NewGuid().ToString(),
                     ExpenseId = expenseId,
-                    TripId = dto.TripId,
-                    PersonId = s.PersonId,
-                    Amount = s.Amount
-                });
+                    dto.TripId,
+                    dto.Description,
+                    dto.Amount,
+                    CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR",
+                    dto.CategoryIndex,
+                    CategoryName = !string.IsNullOrWhiteSpace(dto.CategoryName) ? dto.CategoryName : "General",
+                    dto.PaidByPersonId,
+                    SplitType = !string.IsNullOrWhiteSpace(dto.SplitType) ? dto.SplitType : "EQUAL",
+                    ExpenseDate = expenseDate
+                }, transaction: trans);
 
-                await conn.ExecuteAsync(insertSplit, splitEntities);
+                if (splits.Count > 0)
+                {
+                    const string insertSplit = @"
+                        INSERT INTO ExpenseSplits (split_id, expense_id, trip_id, person_id, amount, created_at)
+                        VALUES (@SplitId, @ExpenseId, @TripId, @PersonId, @Amount, GETDATE())";
+
+                    var splitEntities = splits.Select(s => new
+                    {
+                        SplitId = Guid.NewGuid().ToString(),
+                        ExpenseId = expenseId,
+                        TripId = dto.TripId,
+                        PersonId = s.PersonId,
+                        Amount = s.Amount
+                    });
+
+                    await conn.ExecuteAsync(insertSplit, splitEntities, transaction: trans);
+                }
+
+                trans.Commit();
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
             }
 
             _logger.LogInformation("Created expense {ExpenseId} for trip {TripId}, amount {Amount}", expenseId, dto.TripId, dto.Amount);
@@ -206,37 +217,48 @@ public class ExpenseDataService : IExpenseDataService
                     expense_date = COALESCE(@ExpenseDate, expense_date)
                 WHERE expense_id = @ExpenseId";
 
-            await conn.ExecuteAsync(updateSql, new
+            using var trans = conn.BeginTransaction();
+            try
             {
-                ExpenseId = expenseId,
-                dto.Description,
-                dto.Amount,
-                CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR",
-                dto.CategoryIndex,
-                CategoryName = !string.IsNullOrWhiteSpace(dto.CategoryName) ? dto.CategoryName : "General",
-                dto.PaidByPersonId,
-                SplitType = !string.IsNullOrWhiteSpace(dto.SplitType) ? dto.SplitType : "EQUAL",
-                dto.ExpenseDate
-            });
-
-            await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId });
-
-            if (dto.Splits != null && dto.Splits.Count > 0)
-            {
-                const string insertSplit = @"
-                    INSERT INTO ExpenseSplits (split_id, expense_id, trip_id, person_id, amount, created_at)
-                    VALUES (@SplitId, @ExpenseId, @TripId, @PersonId, @Amount, GETDATE())";
-
-                var splitEntities = dto.Splits.Select(s => new
+                await conn.ExecuteAsync(updateSql, new
                 {
-                    SplitId = Guid.NewGuid().ToString(),
                     ExpenseId = expenseId,
-                    TripId = existing.TripId,
-                    PersonId = s.PersonId,
-                    Amount = s.Amount
-                });
+                    dto.Description,
+                    dto.Amount,
+                    CurrencyCode = !string.IsNullOrWhiteSpace(dto.CurrencyCode) ? dto.CurrencyCode : "INR",
+                    dto.CategoryIndex,
+                    CategoryName = !string.IsNullOrWhiteSpace(dto.CategoryName) ? dto.CategoryName : "General",
+                    dto.PaidByPersonId,
+                    SplitType = !string.IsNullOrWhiteSpace(dto.SplitType) ? dto.SplitType : "EQUAL",
+                    dto.ExpenseDate
+                }, transaction: trans);
 
-                await conn.ExecuteAsync(insertSplit, splitEntities);
+                await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId }, transaction: trans);
+
+                if (dto.Splits != null && dto.Splits.Count > 0)
+                {
+                    const string insertSplit = @"
+                        INSERT INTO ExpenseSplits (split_id, expense_id, trip_id, person_id, amount, created_at)
+                        VALUES (@SplitId, @ExpenseId, @TripId, @PersonId, @Amount, GETDATE())";
+
+                    var splitEntities = dto.Splits.Select(s => new
+                    {
+                        SplitId = Guid.NewGuid().ToString(),
+                        ExpenseId = expenseId,
+                        TripId = existing.TripId,
+                        PersonId = s.PersonId,
+                        Amount = s.Amount
+                    });
+
+                    await conn.ExecuteAsync(insertSplit, splitEntities, transaction: trans);
+                }
+
+                trans.Commit();
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
             }
 
             _logger.LogInformation("Updated expense {ExpenseId}", expenseId);
@@ -258,12 +280,22 @@ public class ExpenseDataService : IExpenseDataService
             var existing = await GetExpenseByIdAsync(expenseId);
             if (existing == null) return false;
 
-            await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId });
-            var rows = await conn.ExecuteAsync("DELETE FROM Expenses WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId });
+            using var trans = conn.BeginTransaction();
+            try
+            {
+                await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId }, transaction: trans);
+                var rows = await conn.ExecuteAsync("DELETE FROM Expenses WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId }, transaction: trans);
+                trans.Commit();
 
-            _logger.LogInformation("Deleted expense {ExpenseId}", expenseId);
-            await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
-            return rows > 0;
+                _logger.LogInformation("Deleted expense {ExpenseId}", expenseId);
+                await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
+                return rows > 0;
+            }
+            catch
+            {
+                trans.Rollback();
+                throw;
+            }
         }
         catch (Exception ex)
         {

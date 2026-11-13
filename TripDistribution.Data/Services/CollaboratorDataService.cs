@@ -9,6 +9,7 @@ namespace TripDistribution.Data.Services;
 public interface ICollaboratorDataService
 {
     Task<IEnumerable<CollaboratorDto>> GetCollaboratorsByTripAsync(string tripId);
+    Task<CollaboratorDto?> GetCollaboratorByIdAsync(string collabId);
     Task<CollaboratorDto> InviteCollaboratorAsync(InviteCollaboratorDto dto);
     Task<bool> UpdateCollaboratorRoleAsync(string collabId, string role);
     Task<bool> RemoveCollaboratorAsync(string collabId);
@@ -45,6 +46,29 @@ public class CollaboratorDataService : ICollaboratorDataService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error getting collaborators for trip: {TripId}", tripId);
+            throw;
+        }
+    }
+
+    public async Task<CollaboratorDto?> GetCollaboratorByIdAsync(string collabId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                SELECT tc.collab_id AS CollabId, tc.trip_id AS TripId, tc.user_id AS UserId,
+                       tc.person_id AS PersonId, p.name AS PersonName, tc.phone_number AS PhoneNumber,
+                       u.full_name AS FullName, tc.role AS Role, tc.status AS Status, tc.joined_at AS JoinedAt
+                FROM TripCollaborators tc
+                LEFT JOIN Users u ON tc.user_id = u.user_id
+                LEFT JOIN Persons p ON tc.person_id = p.person_id
+                WHERE tc.collab_id = @CollabId";
+
+            return await conn.QuerySingleOrDefaultAsync<CollaboratorDto>(sql, new { CollabId = collabId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting collaborator by ID: {CollabId}", collabId);
             throw;
         }
     }

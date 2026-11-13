@@ -15,6 +15,7 @@ namespace TripDistribution.Api.Controllers;
 public class CollaboratorsController : ControllerBase
 {
     private readonly ICollaboratorDataService _collaboratorDataService;
+    private readonly ITripDataService _tripDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly INotificationDataService _notificationDataService;
@@ -22,12 +23,14 @@ public class CollaboratorsController : ControllerBase
 
     public CollaboratorsController(
         ICollaboratorDataService collaboratorDataService,
+        ITripDataService tripDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         INotificationDataService notificationDataService,
         ILogger<CollaboratorsController> logger)
     {
         _collaboratorDataService = collaboratorDataService;
+        _tripDataService = tripDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _notificationDataService = notificationDataService;
@@ -39,6 +42,14 @@ public class CollaboratorsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var hasAccess = await _tripDataService.HasUserTripAccessAsync(tripId, userId);
+            if (!hasAccess)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to view collaborators for this trip."));
+
             var collabs = await _collaboratorDataService.GetCollaboratorsByTripAsync(tripId);
             return Ok(ApiResponse<IEnumerable<CollaboratorDto>>.Ok(collabs));
         }
@@ -57,8 +68,16 @@ public class CollaboratorsController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.TripId))
                 return BadRequest(ApiResponse.Fail("TripId is required."));
 
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var canManage = await _tripDataService.CanUserManageTripAsync(dto.TripId, userId);
+            if (!canManage)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to invite collaborators to this trip."));
+
             var collab = await _collaboratorDataService.InviteCollaboratorAsync(dto);
-            await _activityLogDataService.LogActivityAsync(_currentUserContext.UserId, dto.TripId, "INVITE_COLLABORATOR", $"Invited collaborator {dto.PhoneNumber ?? dto.UserId}");
+            await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "INVITE_COLLABORATOR", $"Invited collaborator {dto.PhoneNumber ?? dto.UserId}");
             _logger.LogInformation("Collaborator invited to trip {TripId}", dto.TripId);
 
             if (!string.IsNullOrWhiteSpace(dto.UserId))
@@ -87,6 +106,18 @@ public class CollaboratorsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var collab = await _collaboratorDataService.GetCollaboratorByIdAsync(id);
+            if (collab == null)
+                return NotFound(ApiResponse.Fail("Collaborator not found."));
+
+            var isOwner = await _tripDataService.IsTripOwnerAsync(collab.TripId, userId);
+            if (!isOwner)
+                return StatusCode(403, ApiResponse.Fail("Only the trip owner can modify collaborator roles."));
+
             var updated = await _collaboratorDataService.UpdateCollaboratorRoleAsync(id, dto.Role);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Collaborator not found."));
@@ -106,6 +137,21 @@ public class CollaboratorsController : ControllerBase
     {
         try
         {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var collab = await _collaboratorDataService.GetCollaboratorByIdAsync(id);
+            if (collab == null)
+                return NotFound(ApiResponse.Fail("Collaborator not found."));
+
+            var isOwner = await _tripDataService.IsTripOwnerAsync(collab.TripId, userId);
+            var canManage = await _tripDataService.CanUserManageTripAsync(collab.TripId, userId);
+            var isSelf = !string.IsNullOrEmpty(collab.UserId) && collab.UserId == userId;
+
+            if (!isOwner && !canManage && !isSelf)
+                return StatusCode(403, ApiResponse.Fail("You do not have permission to remove this collaborator."));
+
             var removed = await _collaboratorDataService.RemoveCollaboratorAsync(id);
             if (!removed)
                 return NotFound(ApiResponse.Fail("Collaborator not found."));
