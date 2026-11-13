@@ -10,7 +10,9 @@ namespace TripDistribution.Data.Services;
 public interface IFriendDataService
 {
     Task<IEnumerable<ContactMatchResultDto>> CheckContactsAsync(List<string> contacts);
+    Task<IEnumerable<ContactMatchResultDto>> SearchUsersAsync(string query);
     Task<IEnumerable<FriendDto>> GetFriendsAsync(string userId, string? userPhone);
+    Task<IEnumerable<FriendDto>> GetFriendRequestsAsync(string userId);
     Task<FriendDto> AddOrInviteFriendAsync(string currentUserId, string? currentUserPhone, FriendInviteDto dto);
     Task<bool> UpdateFriendStatusAsync(string connectionId, string userId, string status);
     Task<bool> DeleteFriendAsync(string connectionId, string userId);
@@ -58,6 +60,33 @@ public class FriendDataService : IFriendDataService
         }
     }
 
+    public async Task<IEnumerable<ContactMatchResultDto>> SearchUsersAsync(string query)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            var clean = !string.IsNullOrWhiteSpace(query) ? query.Replace(" ", "").Trim() : "";
+            var last10 = clean.Length >= 10 ? clean[^10..] : clean;
+
+            const string sql = @"
+                SELECT user_id AS UserId, phone_number AS Phone, full_name AS FullName,
+                       diet_type AS DietType, diet_name AS DietName, 1 AS IsRegistered
+                FROM Users
+                WHERE is_active = 1 
+                  AND (
+                      (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10) 
+                      OR full_name LIKE '%' + @Query + '%'
+                  )";
+
+            return await conn.QueryAsync<ContactMatchResultDto>(sql, new { Last10 = last10, Query = query.Trim() });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error searching users for query: {Query}", query);
+            throw;
+        }
+    }
+
     public async Task<IEnumerable<FriendDto>> GetFriendsAsync(string userId, string? userPhone)
     {
         try
@@ -89,6 +118,31 @@ public class FriendDataService : IFriendDataService
         }
     }
 
+    public async Task<IEnumerable<FriendDto>> GetFriendRequestsAsync(string userId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                SELECT connection_id AS ConnectionId, user_id AS UserId, friend_user_id AS FriendUserId,
+                       friend_phone AS FriendPhone, friend_name AS FriendName,
+                       diet_type AS DietType, diet_name AS DietName, status AS Status,
+                       requester_id AS RequesterId, receiver_id AS ReceiverId,
+                       1 AS IsIncoming, created_at AS CreatedAt
+                FROM FriendConnections
+                WHERE (receiver_id = @UserId OR friend_user_id = @UserId)
+                  AND status = 'PENDING'
+                ORDER BY created_at DESC";
+
+            return await conn.QueryAsync<FriendDto>(sql, new { UserId = userId });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting friend requests for user: {UserId}", userId);
+            throw;
+        }
+    }
+
     public async Task<FriendDto> AddOrInviteFriendAsync(string currentUserId, string? currentUserPhone, FriendInviteDto dto)
     {
         try
@@ -98,7 +152,7 @@ public class FriendDataService : IFriendDataService
             var last10 = cleanPhone.Length >= 10 ? cleanPhone[^10..] : cleanPhone;
 
             var registeredUser = await conn.QuerySingleOrDefaultAsync<User>(
-                "SELECT user_id, phone_number, full_name, diet_type, diet_name FROM Users WHERE RIGHT(phone_number, 10) = @Last10 AND is_active = 1",
+                "SELECT user_id AS UserId, phone_number AS PhoneNumber, full_name AS FullName, diet_type AS DietType, diet_name AS DietName FROM Users WHERE RIGHT(phone_number, 10) = @Last10 AND is_active = 1",
                 new { Last10 = last10 });
 
             var connectionId = Guid.NewGuid().ToString();

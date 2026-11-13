@@ -90,17 +90,40 @@ public class FriendsController : ControllerBase
     }
 
     [HttpPost("search")]
-    public IActionResult SearchUsers([FromBody] SearchFriendsDto dto)
+    public async Task<IActionResult> SearchUsers([FromBody] SearchFriendsDto dto)
     {
-        // Dummy implementation to satisfy Flutter app
-        return Ok(new { success = true, users = new object[] { } });
+        try
+        {
+            if (string.IsNullOrWhiteSpace(dto.Phone))
+                return BadRequest(ApiResponse.Fail("Phone number or name is required."));
+
+            var matches = await _friendDataService.SearchUsersAsync(dto.Phone);
+            return Ok(ApiResponse<IEnumerable<ContactMatchResultDto>>.Ok(matches));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in SearchUsers for phone: {Phone}", dto.Phone);
+            return StatusCode(500, ApiResponse.Fail("Failed to search users."));
+        }
     }
 
     [HttpGet("requests")]
-    public IActionResult GetFriendRequests([FromQuery] string userId)
+    public async Task<IActionResult> GetFriendRequests([FromQuery] string? userId = null)
     {
-        // Dummy implementation to satisfy Flutter app
-        return Ok(new { success = true, requests = new object[] { } });
+        try
+        {
+            var targetUserId = !string.IsNullOrWhiteSpace(userId) ? userId : _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(targetUserId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var requests = await _friendDataService.GetFriendRequestsAsync(targetUserId);
+            return Ok(ApiResponse<IEnumerable<FriendDto>>.Ok(requests));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in GetFriendRequests for user: {UserId}", userId);
+            return StatusCode(500, ApiResponse.Fail("Failed to fetch friend requests."));
+        }
     }
 
     [HttpPut("{id}/status")]

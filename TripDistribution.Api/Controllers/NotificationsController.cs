@@ -84,4 +84,38 @@ public class NotificationsController : ControllerBase
             return StatusCode(500, ApiResponse.Fail("Failed to mark notifications as read."));
         }
     }
+
+    [HttpPost("send")]
+    public async Task<IActionResult> SendMessage([FromBody] SendMessageDto dto)
+    {
+        try
+        {
+            var senderId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(senderId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            if (string.IsNullOrWhiteSpace(dto.ToUserId) || string.IsNullOrWhiteSpace(dto.Message))
+                return BadRequest(ApiResponse.Fail("ToUserId and Message are required."));
+
+            var notif = new TripDistribution.Model.Entities.Notification
+            {
+                NotificationId = Guid.NewGuid().ToString(),
+                UserId = dto.ToUserId,
+                TripId = dto.TripId,
+                Title = !string.IsNullOrWhiteSpace(dto.Title) ? dto.Title : $"Message from {_currentUserContext.FullName ?? "User"}",
+                Message = dto.Message,
+                Type = !string.IsNullOrWhiteSpace(dto.Type) ? dto.Type : "CHAT_MESSAGE"
+            };
+
+            await _notificationDataService.CreateNotificationAsync(notif);
+            _logger.LogInformation("Message/Notification sent from {SenderId} to {RecipientId}", senderId, dto.ToUserId);
+
+            return Ok(ApiResponse<TripDistribution.Model.Entities.Notification>.Ok(notif, "Message sent successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in SendMessage from user: {UserId}", _currentUserContext.UserId);
+            return StatusCode(500, ApiResponse.Fail("Failed to send message."));
+        }
+    }
 }

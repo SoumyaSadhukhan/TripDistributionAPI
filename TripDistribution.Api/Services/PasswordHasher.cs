@@ -72,3 +72,4 @@ public class PasswordHasher : IPasswordHasher
             Encoding.UTF8.GetBytes(storedHash.ToLowerInvariant()));
     }
 }
+

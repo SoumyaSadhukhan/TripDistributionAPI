@@ -123,14 +123,15 @@ builder.Services.AddAuthentication(options =>
 builder.Services.AddAuthorization();
 
 // 7. Rate Limiter (Protection against Brute-Force & Denial of Service)
+var permitLimit = builder.Configuration.GetValue<int>("RateLimiting:PermitLimit", builder.Environment.IsDevelopment() ? 2000 : 30);
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.AddFixedWindowLimiter("auth-policy", opt =>
     {
-        opt.PermitLimit = 15;
+        opt.PermitLimit = permitLimit;
         opt.Window = TimeSpan.FromMinutes(1);
-        opt.QueueLimit = 0;
+        opt.QueueLimit = 100;
     });
 });
 

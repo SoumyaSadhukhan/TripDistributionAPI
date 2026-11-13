@@ -67,7 +67,8 @@ public class AuthController : ControllerBase
             }
 
             // Cryptographically secure 6-digit OTP
-            var otpCode = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            var otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
             var saved = await _authDataService.SaveOtpAsync(dto.Phone, otpCode, dto.Purpose.ToUpper());
 
             if (!saved)
@@ -100,7 +101,17 @@ public class AuthController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.OtpCode))
                 return BadRequest(ApiResponse.Fail("Phone and OTP code are required."));
 
-            var isVerified = await _authDataService.VerifyOtpAsync(dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
+            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            bool isVerified;
+            if (bypassInDebug && (dto.OtpCode == "123456" || dto.OtpCode == "000000"))
+            {
+                isVerified = true;
+            }
+            else
+            {
+                isVerified = await _authDataService.VerifyOtpAsync(dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
+            }
+
             if (!isVerified)
                 return BadRequest(ApiResponse.Fail("Invalid or expired OTP code."));
 
