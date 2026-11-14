@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using System.Threading.RateLimiting;
@@ -9,6 +10,7 @@ using TripDistribution.Api.Middleware;
 using TripDistribution.Api.Services;
 using TripDistribution.Data.Connection;
 using TripDistribution.Data.Services;
+using TripDistribution.Model.DTOs.Common;
 
 using Serilog;
 
@@ -49,17 +51,18 @@ builder.Services.AddSwaggerGen(c =>
     {
         Title = "Trip Distribution API",
         Version = "v1",
-        Description = "Production-Ready REST API for Trip Splitting, Expense Distribution, and Debt Settlements"
+        Description = "Enterprise Production REST API for Trip Splitting, Expense Distribution, and Debt Settlements"
     });
 
-    // Add JWT Bearer Security Definition
+    // JWT Bearer Security Definition (OpenAPI Standard)
     c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
-        Description = "JWT Authorization header using the Bearer scheme. Example: \"Authorization: Bearer {token}\"",
+        Description = "Enter your JWT token. Swagger will automatically prefix 'Bearer '.",
         Name = "Authorization",
         In = ParameterLocation.Header,
-        Type = SecuritySchemeType.ApiKey,
-        Scheme = "Bearer"
+        Type = SecuritySchemeType.Http,
+        Scheme = "Bearer",
+        BearerFormat = "JWT"
     });
 
     c.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -100,7 +103,7 @@ builder.Services.AddScoped<IJwtTokenService, JwtTokenService>();
 builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 
-// 6. JWT Authentication Configuration
+// 6. JWT Authentication Configuration with DB-Backed Session Validation
 var jwtKey = builder.Configuration["JwtSettings:SecretKey"] 
     ?? "SplitBillSuperSecretKey_ForTripDistribution_ProductionReady_2026_Key_MustBeLongEnough!";
 var jwtIssuer = builder.Configuration["JwtSettings:Issuer"] ?? "TripDistribution.Api";
@@ -125,6 +128,53 @@ builder.Services.AddAuthentication(options =>
         ValidAudience = jwtAudience,
         ValidateLifetime = true,
         ClockSkew = TimeSpan.Zero
+    };
+
+    // Database-backed Token Validation & Revocation Check
+    options.Events = new JwtBearerEvents
+    {
+        OnTokenValidated = async context =>
+        {
+            var authDataService = context.HttpContext.RequestServices.GetRequiredService<IAuthDataService>();
+
+            // Extract raw token string
+            var authHeader = context.Request.Headers.Authorization.ToString();
+            var rawToken = authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+                ? authHeader[7..].Trim()
+                : null;
+
+            if (string.IsNullOrEmpty(rawToken))
+            {
+                context.Fail("Bearer token missing.");
+                return;
+            }
+
+            // Query database UserTokens table: must exist, be active, and not expired
+            var tokenRecord = await authDataService.GetTokenAsync(rawToken);
+            if (tokenRecord == null || !tokenRecord.IsActive || tokenRecord.ExpiresAt < DateTime.UtcNow)
+            {
+                context.Fail("Session has been revoked or expired. Please log in again.");
+                return;
+            }
+
+            // Verify authenticated user ID matches token owner
+            var userId = context.Principal?.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? context.Principal?.FindFirst("userId")?.Value;
+
+            if (string.IsNullOrEmpty(userId) || tokenRecord.UserId != userId)
+            {
+                context.Fail("Token does not match authenticated user.");
+                return;
+            }
+        },
+        OnChallenge = async context =>
+        {
+            context.HandleResponse();
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.ContentType = "application/json";
+            var response = ApiResponse.Fail("Unauthorized. A valid Bearer token is required to access this resource.");
+            await context.Response.WriteAsync(JsonSerializer.Serialize(response));
+        }
     };
 });
 

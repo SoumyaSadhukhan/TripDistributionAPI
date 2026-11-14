@@ -14,6 +14,7 @@ namespace TripDistribution.Api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 [EnableRateLimiting("auth-policy")]
 public class AuthController : ControllerBase
 {
@@ -46,112 +47,10 @@ public class AuthController : ControllerBase
         _logger = logger;
     }
 
-    [HttpPost("send-otp")]
-    [AllowAnonymous]
-    public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
-    {
-        try
-        {
-            // 1. Resolve existing user if UserId, Username, Email, or Phone is provided
-            User? targetUser = null;
-            if (!string.IsNullOrWhiteSpace(dto.UserId) || !string.IsNullOrWhiteSpace(dto.Username) || !string.IsNullOrWhiteSpace(dto.Email) || !string.IsNullOrWhiteSpace(dto.Phone))
-            {
-                targetUser = await _authDataService.FindUserAsync(dto.UserId, dto.Username, dto.Email, dto.Phone);
-            }
-
-            // For LOGIN or FORGOT_PASSWORD, user MUST exist
-            if (dto.Purpose.Equals("LOGIN", StringComparison.OrdinalIgnoreCase) || dto.Purpose.Equals("FORGOT_PASSWORD", StringComparison.OrdinalIgnoreCase))
-            {
-                if (targetUser == null)
-                    return NotFound(ApiResponse.Fail("No valid user account found with the provided details."));
-            }
-
-            // Determine destination email and phone
-            string? destEmail = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : targetUser?.Email;
-            string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser?.PhoneNumber;
-            string? targetUserId = targetUser?.UserId ?? dto.UserId;
-            string displayName = targetUser?.FullName ?? targetUser?.Username ?? dto.Username ?? "Member";
-
-            if (string.IsNullOrWhiteSpace(destEmail) && string.IsNullOrWhiteSpace(destPhone) && string.IsNullOrWhiteSpace(targetUserId))
-            {
-                return BadRequest(ApiResponse.Fail("Please provide a valid UserId, Username, Email, or Phone number."));
-            }
-
-            // Cryptographically secure 6-digit OTP
-            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
-            var otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
-
-            var saved = await _authDataService.SaveOtpAsync(targetUserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper());
-            if (!saved)
-                return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
-
-            // 2. Dispatch Email via SMTP if destination email is available
-            bool emailSent = false;
-            if (!string.IsNullOrWhiteSpace(destEmail) && destEmail.Contains('@'))
-            {
-                emailSent = await _emailService.SendOtpEmailAsync(destEmail, otpCode, dto.Purpose, displayName);
-            }
-
-            _logger.LogInformation("OTP dispatched: UserId: {UserId}, Email: {Email}, Phone: {Phone}, EmailSent: {EmailSent}", 
-                targetUserId, destEmail, destPhone, emailSent);
-
-            bool exposeOtp = _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
-            var responseData = new
-            {
-                UserId = targetUserId,
-                Email = destEmail,
-                Phone = destPhone,
-                EmailSent = emailSent,
-                OtpCode = (exposeOtp || bypassInDebug) ? otpCode : null,
-                Message = emailSent ? $"OTP sent successfully to email: {destEmail}" : "OTP generated successfully."
-            };
-
-            return Ok(ApiResponse<object>.Ok(responseData));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Exception in SendOtp");
-            return StatusCode(500, ApiResponse.Fail("Failed to process OTP request."));
-        }
-    }
-
-    [HttpPost("verify-otp")]
-    [AllowAnonymous]
-    public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
-    {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(dto.OtpCode))
-                return BadRequest(ApiResponse.Fail("OTP code is required."));
-
-            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
-            bool isVerified;
-            if (bypassInDebug && (dto.OtpCode == "123456" || dto.OtpCode == "000000"))
-            {
-                isVerified = true;
-                if (!string.IsNullOrWhiteSpace(dto.UserId) || !string.IsNullOrWhiteSpace(dto.Email) || !string.IsNullOrWhiteSpace(dto.Phone))
-                {
-                    await _authDataService.VerifyOtpAsync(dto.UserId, dto.Email, dto.Phone, "123456", dto.Purpose.ToUpper());
-                }
-            }
-            else
-            {
-                isVerified = await _authDataService.VerifyOtpAsync(dto.UserId, dto.Email, dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
-            }
-
-            if (!isVerified)
-                return BadRequest(ApiResponse.Fail("Invalid or expired OTP code."));
-
-            _logger.LogInformation("OTP verified for UserId: {UserId}, Email: {Email}, Phone: {Phone}", dto.UserId, dto.Email, dto.Phone);
-            return Ok(ApiResponse.Ok("OTP verified successfully. Account is active."));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Exception in VerifyOtp");
-            return StatusCode(500, ApiResponse.Fail("Failed to verify OTP."));
-        }
-    }
-
+    /// <summary>
+    /// Register a new user. Public endpoint.
+    /// Creates user, generates unique UserId, sends verification OTP to email, and returns Bearer token.
+    /// </summary>
     [HttpPost("register")]
     [AllowAnonymous]
     public async Task<IActionResult> Register([FromBody] RegisterRequestDto dto)
@@ -159,22 +58,22 @@ public class AuthController : ControllerBase
         try
         {
             if ((string.IsNullOrWhiteSpace(dto.Phone) && string.IsNullOrWhiteSpace(dto.Email)) || string.IsNullOrWhiteSpace(dto.Password))
-                return BadRequest(ApiResponse.Fail("Phone or Email, and Password are required."));
+                return BadRequest(ApiResponse.Fail("Email or Phone, and Password are required."));
 
             if (dto.Password.Length < 6)
                 return BadRequest(ApiResponse.Fail("Password must be at least 6 characters long."));
 
             var existing = await _authDataService.FindUserAsync(null, dto.Username, dto.Email, dto.Phone);
             if (existing != null)
-                return BadRequest(ApiResponse.Fail("An account with this phone, email, or username already exists."));
+                return BadRequest(ApiResponse.Fail("An account with this email, phone, or username already exists."));
 
-            // Secure PBKDF2 with Salt
+            // Secure PBKDF2 Password Hashing
             var passwordHash = _passwordHasher.HashPassword(dto.Password);
 
-            // 1. Create user row and generate UserId
+            // 1. Create user row in database and generate UserId
             var user = await _authDataService.CreateUserAsync(dto, passwordHash);
 
-            // 2. If email provided, automatically dispatch verification OTP to their email
+            // 2. Dispatch verification OTP via email if email is provided
             bool emailSent = false;
             string? otpCode = null;
             if (!string.IsNullOrWhiteSpace(user.Email) && user.Email.Contains('@'))
@@ -185,8 +84,10 @@ public class AuthController : ControllerBase
                 emailSent = await _emailService.SendOtpEmailAsync(user.Email, otpCode, "REGISTER", user.FullName);
             }
 
+            // 3. Generate Bearer JWT token
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
 
+            // 4. Save token in database UserTokens table
             await _authDataService.SaveUserTokenAsync(new UserToken
             {
                 TokenId = Guid.NewGuid().ToString(),
@@ -214,7 +115,7 @@ public class AuthController : ControllerBase
             };
 
             var msg = emailSent 
-                ? $"User registered. Verification OTP sent to {user.Email}." 
+                ? $"User registered successfully. Verification OTP sent to {user.Email}." 
                 : "Registration successful.";
 
             return Ok(ApiResponse<AuthResponseDto>.Ok(response, msg));
@@ -226,6 +127,10 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// User Login. Public endpoint.
+    /// Authenticates credentials, revokes previous sessions, issues a fresh Bearer token, and records it in UserTokens.
+    /// </summary>
     [HttpPost("login")]
     [AllowAnonymous]
     public async Task<IActionResult> Login([FromBody] LoginRequestDto dto)
@@ -252,7 +157,7 @@ public class AuthController : ControllerBase
                 return Unauthorized(ApiResponse.Fail("Invalid credentials."));
             }
 
-            // Automatic hash upgrade: if user was stored with legacy SHA-256, upgrade to PBKDF2
+            // Automatic hash upgrade to PBKDF2 if still using legacy SHA-256
             if (!user.PasswordHash.StartsWith("$pbkdf2$"))
             {
                 var newSaltedHash = _passwordHasher.HashPassword(dto.Password);
@@ -260,8 +165,13 @@ public class AuthController : ControllerBase
                 _logger.LogInformation("Upgraded password hash to PBKDF2 for user {UserId}", user.UserId);
             }
 
+            // Revoke all previous active sessions in database for strict single-session security
+            await _authDataService.InvalidateAllUserTokensAsync(user.UserId);
+
+            // Generate fresh JWT Bearer token
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
 
+            // Persist the new active token in UserTokens table
             await _authDataService.SaveUserTokenAsync(new UserToken
             {
                 TokenId = Guid.NewGuid().ToString(),
@@ -274,7 +184,7 @@ public class AuthController : ControllerBase
             });
 
             await _authDataService.UpdateLastLoginAsync(user.UserId);
-            _logger.LogInformation("User logged in successfully: {UserId}", user.UserId);
+            _logger.LogInformation("User logged in successfully: {UserId}, previous tokens revoked", user.UserId);
 
             var response = new AuthResponseDto
             {
@@ -298,6 +208,9 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Biometric Login using active device token.
+    /// </summary>
     [HttpPost("biometric-login")]
     [AllowAnonymous]
     public async Task<IActionResult> BiometricLogin([FromBody] BiometricLoginDto dto)
@@ -315,6 +228,8 @@ public class AuthController : ControllerBase
             if (user == null)
                 return Unauthorized(ApiResponse.Fail("User not found."));
 
+            // Rotate token
+            await _authDataService.InvalidateTokenAsync(dto.AuthToken);
             var (newToken, expiresAt) = _jwtTokenService.GenerateToken(user);
 
             await _authDataService.SaveUserTokenAsync(new UserToken
@@ -353,8 +268,113 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Send OTP to user's registered email or phone. Protected by Bearer Token.
+    /// </summary>
+    [HttpPost("send-otp")]
+    public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
+    {
+        try
+        {
+            var authenticatedUserId = _currentUserContext.UserId;
+            var targetUserId = !string.IsNullOrWhiteSpace(dto.UserId) ? dto.UserId : authenticatedUserId;
+
+            // Resolve target user
+            User? targetUser = null;
+            if (!string.IsNullOrWhiteSpace(targetUserId) || !string.IsNullOrWhiteSpace(dto.Username) || !string.IsNullOrWhiteSpace(dto.Email) || !string.IsNullOrWhiteSpace(dto.Phone))
+            {
+                targetUser = await _authDataService.FindUserAsync(targetUserId, dto.Username, dto.Email, dto.Phone);
+            }
+
+            if (targetUser == null)
+                return NotFound(ApiResponse.Fail("No valid user account found with the provided details."));
+
+            string? destEmail = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : targetUser.Email;
+            string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser.PhoneNumber;
+            string displayName = targetUser.FullName ?? targetUser.Username ?? "Member";
+
+            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            var otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+
+            var saved = await _authDataService.SaveOtpAsync(targetUser.UserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper());
+            if (!saved)
+                return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
+
+            bool emailSent = false;
+            if (!string.IsNullOrWhiteSpace(destEmail) && destEmail.Contains('@'))
+            {
+                emailSent = await _emailService.SendOtpEmailAsync(destEmail, otpCode, dto.Purpose, displayName);
+            }
+
+            _logger.LogInformation("OTP dispatched: UserId: {UserId}, Email: {Email}, Phone: {Phone}, EmailSent: {EmailSent}", 
+                targetUser.UserId, destEmail, destPhone, emailSent);
+
+            bool exposeOtp = _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
+            var responseData = new
+            {
+                UserId = targetUser.UserId,
+                Email = destEmail,
+                Phone = destPhone,
+                EmailSent = emailSent,
+                OtpCode = (exposeOtp || bypassInDebug) ? otpCode : null,
+                Message = emailSent ? $"OTP sent successfully to email: {destEmail}" : "OTP generated successfully."
+            };
+
+            return Ok(ApiResponse<object>.Ok(responseData));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in SendOtp");
+            return StatusCode(500, ApiResponse.Fail("Failed to process OTP request."));
+        }
+    }
+
+    /// <summary>
+    /// Verify OTP code. Protected by Bearer Token.
+    /// </summary>
+    [HttpPost("verify-otp")]
+    public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(dto.OtpCode))
+                return BadRequest(ApiResponse.Fail("OTP code is required."));
+
+            var authenticatedUserId = _currentUserContext.UserId;
+            var targetUserId = !string.IsNullOrWhiteSpace(dto.UserId) ? dto.UserId : authenticatedUserId;
+
+            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            bool isVerified;
+            if (bypassInDebug && (dto.OtpCode == "123456" || dto.OtpCode == "000000"))
+            {
+                isVerified = true;
+                if (!string.IsNullOrWhiteSpace(targetUserId) || !string.IsNullOrWhiteSpace(dto.Email) || !string.IsNullOrWhiteSpace(dto.Phone))
+                {
+                    await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, "123456", dto.Purpose.ToUpper());
+                }
+            }
+            else
+            {
+                isVerified = await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
+            }
+
+            if (!isVerified)
+                return BadRequest(ApiResponse.Fail("Invalid or expired OTP code."));
+
+            _logger.LogInformation("OTP verified for UserId: {UserId}, Email: {Email}, Phone: {Phone}", targetUserId, dto.Email, dto.Phone);
+            return Ok(ApiResponse.Ok("OTP verified successfully. Account is active."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in VerifyOtp");
+            return StatusCode(500, ApiResponse.Fail("Failed to verify OTP."));
+        }
+    }
+
+    /// <summary>
+    /// Reset password. Protected by Bearer Token.
+    /// </summary>
     [HttpPost("reset-password")]
-    [AllowAnonymous]
     public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
     {
         try
@@ -384,8 +404,10 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Get current authenticated user profile.
+    /// </summary>
     [HttpGet("profile")]
-    [Authorize]
     public async Task<IActionResult> GetProfile()
     {
         try
@@ -405,8 +427,10 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Update current authenticated user profile.
+    /// </summary>
     [HttpPut("profile")]
-    [Authorize]
     public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileDto dto)
     {
         try
@@ -428,8 +452,10 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Update current authenticated user dietary preference.
+    /// </summary>
     [HttpPut("diet")]
-    [Authorize]
     public async Task<IActionResult> UpdateDiet([FromBody] UpdateDietDto dto)
     {
         try
@@ -450,9 +476,11 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Verify active token validity. Protected by Bearer Token.
+    /// </summary>
     [HttpPost("verify-token")]
-    [AllowAnonymous]
-    public async Task<IActionResult> VerifyToken([FromBody] TripDistribution.Model.DTOs.Auth.VerifyTokenDto dto)
+    public async Task<IActionResult> VerifyToken([FromBody] VerifyTokenDto dto)
     {
         try
         {
@@ -461,7 +489,7 @@ public class AuthController : ControllerBase
 
             var tokenRecord = await _authDataService.GetTokenAsync(dto.Token);
             if (tokenRecord == null)
-                return Ok(new { valid = false, message = "Invalid token." });
+                return Ok(new { valid = false, message = "Invalid or revoked token." });
 
             if (tokenRecord.ExpiresAt < DateTime.UtcNow)
                 return Ok(new { valid = false, message = "Token expired." });
@@ -477,6 +505,8 @@ public class AuthController : ControllerBase
                 {
                     id = user.UserId,
                     phone = user.PhoneNumber,
+                    email = user.Email,
+                    username = user.Username,
                     fullName = user.FullName,
                     dietType = user.DietType,
                     isBiometricEnabled = user.IsBiometricEnabled,
@@ -492,24 +522,26 @@ public class AuthController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Logout and revoke current Bearer session in database.
+    /// </summary>
     [HttpPost("logout")]
-    [Authorize]
     public async Task<IActionResult> Logout()
     {
         try
         {
             var authHeader = Request.Headers.Authorization.ToString();
             var token = authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) 
-                ? authHeader[7..] 
+                ? authHeader[7..].Trim()
                 : null;
 
             if (!string.IsNullOrEmpty(token))
             {
                 await _authDataService.InvalidateTokenAsync(token);
-                _logger.LogInformation("User logged out, token invalidated");
+                _logger.LogInformation("User logged out, token revoked in database");
             }
 
-            return Ok(ApiResponse.Ok("Logged out successfully."));
+            return Ok(ApiResponse.Ok("Logged out successfully. Session revoked."));
         }
         catch (Exception ex)
         {

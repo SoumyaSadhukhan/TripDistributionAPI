@@ -1,4 +1,4 @@
-﻿-- =============================================================
+-- =============================================================
 -- TRIP DISTRIBUTION DATABASE SCHEMA (PRODUCTION DDL)
 -- Database: SPLIT_BILL_DB
 -- =============================================================
@@ -41,6 +41,23 @@ BEGIN
         [expires_at] datetime NOT NULL,
         [created_at] datetime NULL,
         CONSTRAINT [PK_OtpVerification] PRIMARY KEY ([otp_id])
+    );
+END;
+
+-- Table: UserTokens
+IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'UserTokens')
+BEGIN
+    CREATE TABLE [UserTokens] (
+        [token_id] nvarchar(100) NOT NULL,
+        [user_id] nvarchar(100) NOT NULL,
+        [phone_number] nvarchar(50) NULL,
+        [auth_token] nvarchar(MAX) NOT NULL,
+        [device_info] nvarchar(255) NULL,
+        [is_active] bit NOT NULL DEFAULT 1,
+        [expires_at] datetime NOT NULL,
+        [created_at] datetime NULL,
+        [last_used_at] datetime NULL,
+        CONSTRAINT [PK_UserTokens] PRIMARY KEY ([token_id])
     );
 END;
 
