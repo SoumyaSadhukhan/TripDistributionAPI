@@ -102,6 +102,20 @@ public class ExpensesController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.PaidByPersonId))
                 return BadRequest(ApiResponse.Fail("PaidByPersonId is required."));
 
+            // DEF-01 FIX: Validate expense splits before persisting
+            if (dto.SplitType != "AUTO")
+            {
+                if (dto.Splits == null || dto.Splits.Count == 0)
+                    return BadRequest(ApiResponse.Fail("At least one expense split is required."));
+                if (dto.Splits.Any(s => s.Amount < 0))
+                    return BadRequest(ApiResponse.Fail("Split amounts cannot be negative."));
+                if (dto.Splits.Any(s => s.Amount == 0))
+                    return BadRequest(ApiResponse.Fail("All split amounts must be greater than zero."));
+                var splitSum = dto.Splits.Sum(s => s.Amount);
+                if (Math.Abs(splitSum - dto.Amount) > 0.01m)
+                    return BadRequest(ApiResponse.Fail($"Split amounts ({splitSum:N2}) must equal the expense total ({dto.Amount:N2})."));
+            }
+
             if (!await _tripDataService.HasUserTripAccessAsync(dto.TripId, userId, _currentUserContext.PhoneNumber))
                 return StatusCode(403, ApiResponse.Fail("You do not have access to add expenses to this trip."));
 
@@ -148,6 +162,20 @@ public class ExpensesController : ControllerBase
 
             if (string.IsNullOrWhiteSpace(dto.Description) || dto.Amount <= 0)
                 return BadRequest(ApiResponse.Fail("Description and valid Amount (> 0) are required."));
+
+            // DEF-01 FIX: Validate splits on update too
+            if (dto.SplitType != "AUTO")
+            {
+                if (dto.Splits == null || dto.Splits.Count == 0)
+                    return BadRequest(ApiResponse.Fail("At least one expense split is required."));
+                if (dto.Splits.Any(s => s.Amount < 0))
+                    return BadRequest(ApiResponse.Fail("Split amounts cannot be negative."));
+                if (dto.Splits.Any(s => s.Amount == 0))
+                    return BadRequest(ApiResponse.Fail("All split amounts must be greater than zero."));
+                var splitSum = dto.Splits.Sum(s => s.Amount);
+                if (Math.Abs(splitSum - dto.Amount) > 0.01m)
+                    return BadRequest(ApiResponse.Fail($"Split amounts ({splitSum:N2}) must equal the expense total ({dto.Amount:N2})."));
+            }
 
             var existing = await _expenseDataService.GetExpenseByIdAsync(id);
             if (existing == null)

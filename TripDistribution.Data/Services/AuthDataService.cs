@@ -158,29 +158,33 @@ public class AuthDataService : IAuthDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
+            
+            // Atomic CTE update with UPDLOCK/ROWLOCK prevents TOCTOU race conditions and concurrent double-consumption
             const string sql = @"
-                SELECT TOP 1 otp_id, user_id
-                FROM OtpVerification 
-                WHERE otp_code = @OtpCode 
-                  AND purpose = @Purpose 
-                  AND is_verified = 0 
-                  AND expires_at >= GETUTCDATE()
-                  AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
-                    OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
-                    OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))
-                ORDER BY created_at DESC";
+                WITH TargetOtp AS (
+                    SELECT TOP 1 otp_id, user_id, is_verified
+                    FROM OtpVerification WITH (UPDLOCK, ROWLOCK)
+                    WHERE otp_code = @OtpCode 
+                      AND purpose = @Purpose 
+                      AND is_verified = 0 
+                      AND expires_at >= GETUTCDATE()
+                      AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
+                        OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
+                        OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))
+                    ORDER BY created_at DESC
+                )
+                UPDATE TargetOtp
+                SET is_verified = 1
+                OUTPUT inserted.otp_id, inserted.user_id;";
 
             var result = await conn.QuerySingleOrDefaultAsync<dynamic>(sql, new { UserId = userId, Email = email, Phone = phone, OtpCode = otpCode, Purpose = purpose });
             if (result == null)
             {
-                _logger.LogWarning("OTP verification failed for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
+                _logger.LogWarning("OTP verification failed or already consumed for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
                 return false;
             }
 
-            string matchedOtpId = result.otp_id;
             string? matchedUserId = result.user_id;
-
-            await conn.ExecuteAsync("UPDATE OtpVerification SET is_verified = 1 WHERE otp_id = @OtpId", new { OtpId = matchedOtpId });
 
             // Activate user if associated with user_id
             var targetUid = !string.IsNullOrEmpty(matchedUserId) ? matchedUserId : userId;
@@ -189,7 +193,7 @@ public class AuthDataService : IAuthDataService
                 await conn.ExecuteAsync("UPDATE Users SET is_active = 1, updated_at = GETDATE() WHERE user_id = @UserId", new { UserId = targetUid });
             }
 
-            _logger.LogInformation("OTP verified successfully for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
+            _logger.LogInformation("OTP verified and atomically consumed for user: {UserId}, email: {Email}, phone: {Phone}", userId, email, phone);
             return true;
         }
         catch (Exception ex)

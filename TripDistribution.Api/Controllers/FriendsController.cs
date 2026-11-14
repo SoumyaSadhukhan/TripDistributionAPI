@@ -53,7 +53,22 @@ public class FriendsController : ControllerBase
     {
         try
         {
-            var matches = await _friendDataService.CheckContactsAsync(dto.Contacts);
+            if (dto == null || dto.Contacts == null || dto.Contacts.Count == 0)
+                return BadRequest(ApiResponse.Fail("Contacts list cannot be empty."));
+
+            if (dto.Contacts.Count > 100)
+                return BadRequest(ApiResponse.Fail("A maximum of 100 contacts can be checked per request."));
+
+            // Normalize phone numbers (digits only, min 10 digits)
+            var normalized = dto.Contacts
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => new string(p.Where(char.IsDigit).ToArray()))
+                .Where(p => p.Length >= 10)
+                .Distinct()
+                .Take(100)
+                .ToList();
+
+            var matches = await _friendDataService.CheckContactsAsync(normalized);
             return Ok(ApiResponse<IEnumerable<ContactMatchResultDto>>.Ok(matches));
         }
         catch (Exception ex)

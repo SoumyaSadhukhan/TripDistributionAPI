@@ -87,12 +87,14 @@ public class GroupsController : ControllerBase
     }
 
     [HttpPut("{id}")]
-    public async Task<IActionResult> UpdateGroup(string id, [FromBody] string name)
+    public async Task<IActionResult> UpdateGroup(string id, [FromBody] UpdateGroupDto dto)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(name))
+            if (dto == null || string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(ApiResponse.Fail("Group name is required."));
+
+            var name = dto.Name;
 
             var userId = _currentUserContext.UserId;
             if (string.IsNullOrEmpty(userId))

@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using TripDistribution.Api.Services;
 using TripDistribution.Data.Services;
@@ -25,6 +26,7 @@ public class AuthController : ControllerBase
     private readonly IPasswordHasher _passwordHasher;
     private readonly IEmailService _emailService;
     private readonly IConfiguration _configuration;
+    private readonly IHostEnvironment _environment;
     private readonly ILogger<AuthController> _logger;
 
     public AuthController(
@@ -35,6 +37,7 @@ public class AuthController : ControllerBase
         IPasswordHasher passwordHasher,
         IEmailService emailService,
         IConfiguration configuration,
+        IHostEnvironment environment,
         ILogger<AuthController> logger)
     {
         _authDataService = authDataService;
@@ -44,6 +47,7 @@ public class AuthController : ControllerBase
         _passwordHasher = passwordHasher;
         _emailService = emailService;
         _configuration = configuration;
+        _environment = environment;
         _logger = logger;
     }
 
@@ -78,13 +82,14 @@ public class AuthController : ControllerBase
             string? otpCode = null;
             if (!string.IsNullOrWhiteSpace(user.Email) && user.Email.Contains('@'))
             {
-                var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+                var isDev = _environment.IsDevelopment();
+                var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
                 otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
                 await _authDataService.SaveOtpAsync(user.UserId, user.Email, user.PhoneNumber, otpCode, "REGISTER");
                 emailSent = await _emailService.SendOtpEmailAsync(user.Email, otpCode, "REGISTER", user.FullName);
             }
 
-            // 3. Generate Bearer JWT token
+            // 3. Generate Bearer JWT token (with unique JTI nonce)
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
 
             // 4. Save token in database UserTokens table
@@ -168,7 +173,7 @@ public class AuthController : ControllerBase
             // Revoke all previous active sessions in database for strict single-session security
             await _authDataService.InvalidateAllUserTokensAsync(user.UserId);
 
-            // Generate fresh JWT Bearer token
+            // Generate fresh JWT Bearer token with unique JTI nonce
             var (token, expiresAt) = _jwtTokenService.GenerateToken(user);
 
             // Persist the new active token in UserTokens table
@@ -203,7 +208,7 @@ public class AuthController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Exception in Login for phone: {Phone}", dto.Phone);
+            _logger.LogError(ex, "Exception in Login");
             return StatusCode(500, ApiResponse.Fail("Login failed. Please try again."));
         }
     }
@@ -228,7 +233,7 @@ public class AuthController : ControllerBase
             if (user == null)
                 return Unauthorized(ApiResponse.Fail("User not found."));
 
-            // Rotate token
+            // Rotate token: invalidate old session
             await _authDataService.InvalidateTokenAsync(dto.AuthToken);
             var (newToken, expiresAt) = _jwtTokenService.GenerateToken(user);
 
@@ -270,6 +275,7 @@ public class AuthController : ControllerBase
 
     /// <summary>
     /// Send OTP to user's registered email or phone. Protected by Bearer Token.
+    /// Strict BOLA Enforcement: An authenticated user cannot request OTP for another user.
     /// </summary>
     [HttpPost("send-otp")]
     public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
@@ -277,7 +283,15 @@ public class AuthController : ControllerBase
         try
         {
             var authenticatedUserId = _currentUserContext.UserId;
-            var targetUserId = !string.IsNullOrWhiteSpace(dto.UserId) ? dto.UserId : authenticatedUserId;
+
+            // Strict BOLA Guard: Authenticated user cannot trigger OTP for another account
+            if (!string.IsNullOrWhiteSpace(dto.UserId) && !string.IsNullOrWhiteSpace(authenticatedUserId) && dto.UserId != authenticatedUserId)
+            {
+                _logger.LogWarning("BOLA blocked: Authenticated user {AuthUser} attempted to request OTP for target {TargetUser}", authenticatedUserId, dto.UserId);
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.Fail("You are not authorized to request OTP for another user account."));
+            }
+
+            var targetUserId = !string.IsNullOrWhiteSpace(authenticatedUserId) ? authenticatedUserId : dto.UserId;
 
             // Resolve target user
             User? targetUser = null;
@@ -293,7 +307,8 @@ public class AuthController : ControllerBase
             string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser.PhoneNumber;
             string displayName = targetUser.FullName ?? targetUser.Username ?? "Member";
 
-            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            var isDev = _environment.IsDevelopment();
+            var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
             var otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
 
             var saved = await _authDataService.SaveOtpAsync(targetUser.UserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper());
@@ -309,7 +324,7 @@ public class AuthController : ControllerBase
             _logger.LogInformation("OTP dispatched: UserId: {UserId}, Email: {Email}, Phone: {Phone}, EmailSent: {EmailSent}", 
                 targetUser.UserId, destEmail, destPhone, emailSent);
 
-            bool exposeOtp = _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
+            var exposeOtp = isDev && _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
             var responseData = new
             {
                 UserId = targetUser.UserId,
@@ -331,6 +346,7 @@ public class AuthController : ControllerBase
 
     /// <summary>
     /// Verify OTP code. Protected by Bearer Token.
+    /// Strict BOLA Enforcement: An authenticated user cannot verify OTP for another user.
     /// </summary>
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
@@ -341,9 +357,18 @@ public class AuthController : ControllerBase
                 return BadRequest(ApiResponse.Fail("OTP code is required."));
 
             var authenticatedUserId = _currentUserContext.UserId;
-            var targetUserId = !string.IsNullOrWhiteSpace(dto.UserId) ? dto.UserId : authenticatedUserId;
 
-            var bypassInDebug = _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            // Strict BOLA Guard: Authenticated user cannot verify OTP for another account
+            if (!string.IsNullOrWhiteSpace(dto.UserId) && !string.IsNullOrWhiteSpace(authenticatedUserId) && dto.UserId != authenticatedUserId)
+            {
+                _logger.LogWarning("BOLA blocked: Authenticated user {AuthUser} attempted to verify OTP for target {TargetUser}", authenticatedUserId, dto.UserId);
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.Fail("You are not authorized to verify OTP for another user account."));
+            }
+
+            var targetUserId = !string.IsNullOrWhiteSpace(authenticatedUserId) ? authenticatedUserId : dto.UserId;
+
+            var isDev = _environment.IsDevelopment();
+            var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
             bool isVerified;
             if (bypassInDebug && (dto.OtpCode == "123456" || dto.OtpCode == "000000"))
             {
@@ -355,6 +380,7 @@ public class AuthController : ControllerBase
             }
             else
             {
+                // Atomic verification prevents TOCTOU race conditions and duplicate OTP reuse
                 isVerified = await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
             }
 

@@ -1,17 +1,32 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace TripDistribution.Model.DTOs.Trips;
 
 public class CreateTripDto
 {
     public string? TripId { get; set; }
+
+    [Required(ErrorMessage = "Trip name is required.")]
+    [StringLength(100, MinimumLength = 1, ErrorMessage = "Trip name must be between 1 and 100 characters.")]
     public string Name { get; set; } = string.Empty;
+
+    [StringLength(500, ErrorMessage = "Trip description cannot exceed 500 characters.")]
     public string? Description { get; set; }
+
+    [StringLength(10, ErrorMessage = "Currency code cannot exceed 10 characters.")]
     public string CurrencyCode { get; set; } = "INR";
 }
 
 public class UpdateTripDto
 {
+    [Required(ErrorMessage = "Trip name is required.")]
+    [StringLength(100, MinimumLength = 1, ErrorMessage = "Trip name must be between 1 and 100 characters.")]
     public string Name { get; set; } = string.Empty;
+
+    [StringLength(500, ErrorMessage = "Trip description cannot exceed 500 characters.")]
     public string? Description { get; set; }
+
+    [StringLength(10, ErrorMessage = "Currency code cannot exceed 10 characters.")]
     public string CurrencyCode { get; set; } = "INR";
 }
 

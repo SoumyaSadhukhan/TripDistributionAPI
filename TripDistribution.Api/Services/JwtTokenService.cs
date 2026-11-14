@@ -17,13 +17,33 @@ public class JwtTokenService : IJwtTokenService
 {
     private const string DefaultSecretKey = "SplitBillSuperSecretKey_ForTripDistribution_ProductionReady_2026_Key_MustBeLongEnough!";
     private readonly IConfiguration _configuration;
+    private readonly IHostEnvironment _environment;
 
-    public JwtTokenService(IConfiguration configuration)
+    public JwtTokenService(IConfiguration configuration, IHostEnvironment environment)
     {
         _configuration = configuration;
+        _environment = environment;
     }
 
-    private string GetSecretKey() => _configuration["JwtSettings:SecretKey"] ?? DefaultSecretKey;
+    private string GetSecretKey()
+    {
+        var key = _configuration["JwtSettings:SecretKey"];
+        if (string.IsNullOrWhiteSpace(key) || key == DefaultSecretKey)
+        {
+            if (_environment.IsProduction())
+            {
+                throw new InvalidOperationException("Production JWT SecretKey is missing or using default fallback! Configure a strong secret key in environment variables.");
+            }
+            return DefaultSecretKey;
+        }
+
+        if (key.Length < 32)
+        {
+            throw new InvalidOperationException("JWT SecretKey must be at least 32 characters (256 bits) long.");
+        }
+
+        return key;
+    }
 
     public (string Token, DateTime ExpiresAt) GenerateToken(User user)
     {
@@ -36,8 +56,14 @@ public class JwtTokenService : IJwtTokenService
         var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var expiresAt = DateTime.UtcNow.AddMinutes(expiryMinutes);
 
+        // Every token contains a globally unique nonce (JTI) and timestamp (IAT)
+        var jti = Guid.NewGuid().ToString();
+        var iat = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+
         var claims = new List<Claim>
         {
+            new(JwtRegisteredClaimNames.Jti, jti),
+            new(JwtRegisteredClaimNames.Iat, iat, ClaimValueTypes.Integer64),
             new(ClaimTypes.NameIdentifier, user.UserId),
             new(AuthConstants.UserIdClaim, user.UserId),
             new(AuthConstants.PhoneClaim, user.PhoneNumber),

@@ -85,6 +85,12 @@ public class TripsController : ControllerBase
             if (string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(ApiResponse.Fail("Trip name is required."));
 
+            if (dto.Name.Length > 100)
+                return BadRequest(ApiResponse.Fail("Trip name cannot exceed 100 characters."));
+
+            if (dto.Description != null && dto.Description.Length > 500)
+                return BadRequest(ApiResponse.Fail("Trip description cannot exceed 500 characters."));
+
             var userId = _currentUserContext.UserId;
             var phone = _currentUserContext.PhoneNumber;
             var name = _currentUserContext.FullName;
@@ -156,6 +162,12 @@ public class TripsController : ControllerBase
 
             if (string.IsNullOrWhiteSpace(dto.Name))
                 return BadRequest(ApiResponse.Fail("Trip name is required."));
+
+            if (dto.Name.Length > 100)
+                return BadRequest(ApiResponse.Fail("Trip name cannot exceed 100 characters."));
+
+            if (dto.Description != null && dto.Description.Length > 500)
+                return BadRequest(ApiResponse.Fail("Trip description cannot exceed 500 characters."));
 
             // Verify permission (Owner, Admin or Editor)
             if (!await _tripDataService.CanUserManageTripAsync(id, userId))

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
 
 namespace TripDistribution.Api.Middleware
 {
@@ -7,11 +8,13 @@ namespace TripDistribution.Api.Middleware
     {
         private readonly RequestDelegate _next;
         private readonly ILogger<GlobalExceptionMiddleware> _logger;
+        private readonly IHostEnvironment _environment;
 
-        public GlobalExceptionMiddleware(RequestDelegate next, ILogger<GlobalExceptionMiddleware> logger)
+        public GlobalExceptionMiddleware(RequestDelegate next, ILogger<GlobalExceptionMiddleware> logger, IHostEnvironment environment)
         {
             _next = next;
             _logger = logger;
+            _environment = environment;
         }
 
         public async Task InvokeAsync(HttpContext context)
@@ -22,21 +25,24 @@ namespace TripDistribution.Api.Middleware
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "An unhandled exception occurred while processing the request.");
-                await HandleExceptionAsync(context, ex);
+                var correlationId = Guid.NewGuid().ToString();
+                _logger.LogError(ex, "Unhandled exception occurred. CorrelationId: {CorrelationId}, Path: {Path}, Method: {Method}", 
+                    correlationId, context.Request.Path, context.Request.Method);
+                await HandleExceptionAsync(context, ex, correlationId, _environment);
             }
         }
 
-        private static Task HandleExceptionAsync(HttpContext context, Exception exception)
+        private static Task HandleExceptionAsync(HttpContext context, Exception exception, string correlationId, IHostEnvironment env)
         {
             context.Response.ContentType = "application/json";
             context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
 
             var response = new
             {
-                StatusCode = context.Response.StatusCode,
-                Message = "Internal Server Error from the custom middleware.",
-                Detailed = exception.Message // Keep detailed for debugging during this phase
+                statusCode = context.Response.StatusCode,
+                message = "An unexpected error occurred while processing your request.",
+                correlationId = correlationId,
+                detailed = env.IsDevelopment() ? exception.Message : null
             };
 
             var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };

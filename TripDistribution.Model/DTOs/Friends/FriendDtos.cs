@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using TripDistribution.Model.Enums;
 
 namespace TripDistribution.Model.DTOs.Friends;
@@ -12,6 +13,7 @@ public class FriendInviteDto
 
 public class CheckContactsDto
 {
+    [MaxLength(100, ErrorMessage = "A maximum of 100 contacts can be verified per request.")]
     public List<string> Contacts { get; set; } = [];
 }
 
