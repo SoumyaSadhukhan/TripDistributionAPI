@@ -318,6 +318,12 @@ app.Use(async (context, next) =>
 // Middleware Pipeline
 app.UseMiddleware<GlobalExceptionMiddleware>();
 
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+    app.UseHsts();
+}
+
 // Enable Swagger in Development and Production for testing
 app.UseSwagger();
 app.UseSwaggerUI(c =>

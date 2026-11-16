@@ -93,9 +93,15 @@ public class FriendsController : ControllerBase
                 return Unauthorized(ApiResponse.Fail("Unauthorized user."));
 
             var result = await _friendDataService.AddOrInviteFriendAsync(userId, phone, dto);
-            _logger.LogInformation("Friend added: {FriendPhone} by user {UserId}", dto.FriendPhone, userId);
+            _logger.LogInformation("Friend request processed for phone {FriendPhone} by user {UserId} with status {Status}", dto.FriendPhone, userId, result.Status);
 
-            return Ok(ApiResponse<FriendDto>.Ok(result, "Friend added successfully."));
+            var message = result.Status == "PENDING" ? "Friend request sent successfully." : "Friend connection established.";
+            return Ok(ApiResponse<FriendDto>.Ok(result, message));
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning("Validation rejected in AddOrInviteFriend: {Message}", ex.Message);
+            return BadRequest(ApiResponse.Fail(ex.Message));
         }
         catch (Exception ex)
         {

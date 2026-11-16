@@ -45,5 +45,5 @@ public class FriendDto
 
 public class UpdateFriendStatusDto
 {
-    public string Status { get; set; } = "ACCEPTED"; // ACCEPTED, REJECTED
+    public string Status { get; set; } = "ACCEPTED"; // ACCEPTED, REJECTED, CANCELLED
 }

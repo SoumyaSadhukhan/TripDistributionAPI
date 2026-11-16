@@ -86,7 +86,14 @@ public class AuthController : ControllerBase
                 var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
                 otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
                 await _authDataService.SaveOtpAsync(user.UserId, user.Email, user.PhoneNumber, otpCode, "REGISTER");
-                emailSent = await _emailService.SendOtpEmailAsync(user.Email, otpCode, "REGISTER", user.FullName);
+                if (!bypassInDebug)
+                {
+                    emailSent = await _emailService.SendOtpEmailAsync(user.Email, otpCode, "REGISTER", user.FullName);
+                }
+                else
+                {
+                    emailSent = true;
+                }
             }
 
             // 3. Generate Bearer JWT token (with unique JTI nonce)
@@ -274,9 +281,11 @@ public class AuthController : ControllerBase
     }
 
     /// <summary>
-    /// Send OTP to user's registered email or phone. Protected by Bearer Token.
-    /// Strict BOLA Enforcement: An authenticated user cannot request OTP for another user.
+    /// Send OTP to user's registered email or phone. Open to unauthenticated users for FORGOT_PASSWORD and REGISTER.
+    /// Strict BOLA Enforcement: If authenticated, user cannot request OTP for another user.
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth-policy")]
     [HttpPost("send-otp")]
     public async Task<IActionResult> SendOtp([FromBody] SendOtpDto dto)
     {
@@ -301,7 +310,20 @@ public class AuthController : ControllerBase
             }
 
             if (targetUser == null)
+            {
+                // Account Enumeration Defense: For FORGOT_PASSWORD, return generic success so account existence is not leaked
+                if (string.Equals(dto.Purpose, "FORGOT_PASSWORD", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogInformation("Account enumeration defense: Silent discard for non-existent target during FORGOT_PASSWORD");
+                    return Ok(ApiResponse<object>.Ok(new
+                    {
+                        EmailSent = true,
+                        Message = "If an active account matches the provided details, a verification code has been dispatched."
+                    }));
+                }
+
                 return NotFound(ApiResponse.Fail("No valid user account found with the provided details."));
+            }
 
             string? destEmail = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : targetUser.Email;
             string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser.PhoneNumber;
@@ -318,7 +340,14 @@ public class AuthController : ControllerBase
             bool emailSent = false;
             if (!string.IsNullOrWhiteSpace(destEmail) && destEmail.Contains('@'))
             {
-                emailSent = await _emailService.SendOtpEmailAsync(destEmail, otpCode, dto.Purpose, displayName);
+                if (!bypassInDebug)
+                {
+                    emailSent = await _emailService.SendOtpEmailAsync(destEmail, otpCode, dto.Purpose, displayName);
+                }
+                else
+                {
+                    emailSent = true;
+                }
             }
 
             _logger.LogInformation("OTP dispatched: UserId: {UserId}, Email: {Email}, Phone: {Phone}, EmailSent: {EmailSent}", 
@@ -345,9 +374,11 @@ public class AuthController : ControllerBase
     }
 
     /// <summary>
-    /// Verify OTP code. Protected by Bearer Token.
-    /// Strict BOLA Enforcement: An authenticated user cannot verify OTP for another user.
+    /// Verify OTP code. Open to unauthenticated users for account verification.
+    /// Strict BOLA Enforcement: If authenticated, user cannot verify OTP for another user.
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth-policy")]
     [HttpPost("verify-otp")]
     public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpDto dto)
     {
@@ -398,34 +429,54 @@ public class AuthController : ControllerBase
     }
 
     /// <summary>
-    /// Reset password. Protected by Bearer Token.
+    /// Reset password. Open to unauthenticated users with verified OTP.
+    /// Strictly requires valid, unexpired, one-time OTP with purpose FORGOT_PASSWORD.
     /// </summary>
+    [AllowAnonymous]
+    [EnableRateLimiting("auth-policy")]
     [HttpPost("reset-password")]
     public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(dto.Phone) || string.IsNullOrWhiteSpace(dto.OtpCode) || string.IsNullOrWhiteSpace(dto.NewPassword))
-                return BadRequest(ApiResponse.Fail("Phone, OTP code, and new password are required."));
+            if ((string.IsNullOrWhiteSpace(dto.Phone) && string.IsNullOrWhiteSpace(dto.Email)) || 
+                string.IsNullOrWhiteSpace(dto.OtpCode) || 
+                string.IsNullOrWhiteSpace(dto.NewPassword))
+            {
+                return BadRequest(ApiResponse.Fail("Email or phone, OTP code, and new password are required."));
+            }
 
             if (dto.NewPassword.Length < 6)
                 return BadRequest(ApiResponse.Fail("New password must be at least 6 characters long."));
 
-            var isVerified = await _authDataService.VerifyOtpAsync(dto.Phone, dto.OtpCode, "FORGOT_PASSWORD");
+            // Atomic verification strictly enforces:
+            // 1. One-time usage (is_verified = 0 atomically flipped to 1)
+            // 2. Unexpired OTP (expires_at >= GETUTCDATE())
+            // 3. Exact purpose ("FORGOT_PASSWORD")
+            // 4. Prevention of reuse
+            var isVerified = await _authDataService.VerifyOtpAsync(null, dto.Email, dto.Phone, dto.OtpCode, "FORGOT_PASSWORD");
+
             if (!isVerified)
                 return BadRequest(ApiResponse.Fail("Invalid or expired OTP verification code."));
 
             var newHash = _passwordHasher.HashPassword(dto.NewPassword);
-            var updated = await _authDataService.UpdatePasswordAsync(dto.Phone, newHash);
+            var updated = await _authDataService.UpdatePasswordAsync(dto.Phone, dto.Email, newHash);
             if (!updated)
-                return NotFound(ApiResponse.Fail("Failed to update password. User not found."));
+                return BadRequest(ApiResponse.Fail("Failed to update password. User account not found."));
 
-            _logger.LogInformation("Password reset for phone: {Phone}", dto.Phone);
+            // Revoke all prior active sessions for this account upon password reset
+            var user = await _authDataService.FindUserAsync(null, null, dto.Email, dto.Phone);
+            if (user != null)
+            {
+                await _authDataService.InvalidateAllUserTokensAsync(user.UserId);
+            }
+
+            _logger.LogInformation("Password reset successfully for user: {Email}/{Phone}", dto.Email, dto.Phone);
             return Ok(ApiResponse.Ok("Password reset successfully. Please log in with your new password."));
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Exception in ResetPassword for phone: {Phone}", dto.Phone);
+            _logger.LogError(ex, "Exception in ResetPassword for user: {Email}/{Phone}", dto.Email, dto.Phone);
             return StatusCode(500, ApiResponse.Fail("Password reset failed."));
         }
     }

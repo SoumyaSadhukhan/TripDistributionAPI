@@ -10,7 +10,8 @@ public class UpdateDietDto
 
 public class ResetPasswordDto
 {
-    public string Phone { get; set; } = string.Empty;
+    public string? Phone { get; set; }
+    public string? Email { get; set; }
     public string OtpCode { get; set; } = string.Empty;
     public string NewPassword { get; set; } = string.Empty;
 }

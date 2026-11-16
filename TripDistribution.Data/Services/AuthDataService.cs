@@ -21,6 +21,7 @@ public interface IAuthDataService
     Task InvalidateTokenAsync(string token);
     Task InvalidateAllUserTokensAsync(string userId);
     Task<bool> UpdatePasswordAsync(string phone, string newPasswordHash);
+    Task<bool> UpdatePasswordAsync(string? phone, string? email, string newPasswordHash);
     Task UpdateLastLoginAsync(string userId);
 }
 
@@ -313,21 +314,27 @@ public class AuthDataService : IAuthDataService
         }
     }
 
-    public async Task<bool> UpdatePasswordAsync(string phone, string newPasswordHash)
+    public Task<bool> UpdatePasswordAsync(string phone, string newPasswordHash)
+        => UpdatePasswordAsync(phone, null, newPasswordHash);
+
+    public async Task<bool> UpdatePasswordAsync(string? phone, string? email, string newPasswordHash)
     {
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             var rows = await conn.ExecuteAsync(
-                "UPDATE Users SET password_hash = @PasswordHash, updated_at = GETDATE() WHERE phone_number = @Phone AND is_active = 1",
-                new { PasswordHash = newPasswordHash, Phone = phone });
+                @"UPDATE Users SET password_hash = @PasswordHash, updated_at = GETDATE() 
+                  WHERE is_active = 1 
+                    AND ((@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone)
+                      OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email))",
+                new { PasswordHash = newPasswordHash, Phone = phone, Email = email });
 
-            _logger.LogInformation("Password updated for phone: {Phone}", phone);
+            _logger.LogInformation("Password updated for phone: {Phone}, email: {Email}", phone, email);
             return rows > 0;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error updating password for phone: {Phone}", phone);
+            _logger.LogError(ex, "Error updating password for phone: {Phone}, email: {Email}", phone, email);
             throw;
         }
     }

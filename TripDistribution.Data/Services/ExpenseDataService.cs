@@ -153,11 +153,7 @@ public class ExpenseDataService : IExpenseDataService
             {
                 var splitsTotal = splits.Sum(s => s.Amount);
                 var diff = dto.Amount - splitsTotal;
-                if (Math.Abs(diff) > 0.00m && Math.Abs(diff) <= 0.10m)
-                {
-                    splits[^1].Amount += diff;
-                }
-                else if (Math.Abs(diff) > 0.10m)
+                if (diff != 0m)
                 {
                     throw new InvalidOperationException($"The sum of split amounts ({splitsTotal}) does not equal total expense amount ({dto.Amount}).");
                 }
@@ -260,11 +256,7 @@ public class ExpenseDataService : IExpenseDataService
                 {
                     var splitsTotal = dto.Splits.Sum(s => s.Amount);
                     var diff = dto.Amount - splitsTotal;
-                    if (Math.Abs(diff) > 0.00m && Math.Abs(diff) <= 0.10m)
-                    {
-                        dto.Splits[^1].Amount += diff;
-                    }
-                    else if (Math.Abs(diff) > 0.10m)
+                    if (diff != 0m)
                     {
                         throw new InvalidOperationException($"The sum of split amounts ({splitsTotal}) does not equal total expense amount ({dto.Amount}).");
                     }

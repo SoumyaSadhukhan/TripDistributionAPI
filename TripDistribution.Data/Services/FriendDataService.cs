@@ -103,10 +103,11 @@ public class FriendDataService : IFriendDataService
                        CASE WHEN receiver_id = @UserId OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10 AND user_id <> @UserId) THEN 1 ELSE 0 END AS IsIncoming,
                        created_at AS CreatedAt
                 FROM FriendConnections
-                WHERE user_id = @UserId 
+                WHERE (user_id = @UserId 
                    OR friend_user_id = @UserId 
                    OR receiver_id = @UserId
-                   OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10)
+                   OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10))
+                  AND status = 'ACCEPTED'
                 ORDER BY created_at DESC";
 
             return await conn.QueryAsync<FriendDto>(sql, new { UserId = userId, Last10 = last10 });
@@ -130,7 +131,7 @@ public class FriendDataService : IFriendDataService
                        requester_id AS RequesterId, receiver_id AS ReceiverId,
                        1 AS IsIncoming, created_at AS CreatedAt
                 FROM FriendConnections
-                WHERE (receiver_id = @UserId OR friend_user_id = @UserId)
+                WHERE (receiver_id = @UserId OR (friend_user_id = @UserId AND (requester_id IS NULL OR requester_id <> @UserId)))
                   AND status = 'PENDING'
                 ORDER BY created_at DESC";
 
@@ -151,46 +152,136 @@ public class FriendDataService : IFriendDataService
             var cleanPhone = dto.FriendPhone.Replace(" ", "").Trim();
             var last10 = cleanPhone.Length >= 10 ? cleanPhone[^10..] : cleanPhone;
 
+            var curCleanPhone = !string.IsNullOrWhiteSpace(currentUserPhone) ? currentUserPhone.Replace(" ", "").Trim() : "";
+            var curLast10 = curCleanPhone.Length >= 10 ? curCleanPhone[^10..] : curCleanPhone;
+
             var registeredUser = await conn.QuerySingleOrDefaultAsync<User>(
                 "SELECT user_id AS UserId, phone_number AS PhoneNumber, full_name AS FullName, diet_type AS DietType, diet_name AS DietName FROM Users WHERE RIGHT(phone_number, 10) = @Last10 AND is_active = 1",
                 new { Last10 = last10 });
 
-            var connectionId = Guid.NewGuid().ToString();
+            // Self-invitation prevention
+            if (registeredUser != null && registeredUser.UserId == currentUserId)
+            {
+                throw new InvalidOperationException("You cannot send a friend request to yourself.");
+            }
+            if (!string.IsNullOrWhiteSpace(curLast10) && last10 == curLast10)
+            {
+                throw new InvalidOperationException("You cannot send a friend request to yourself.");
+            }
+
+            var targetUserId = registeredUser?.UserId;
             var dietName = registeredUser?.DietName ?? (!string.IsNullOrWhiteSpace(dto.DietName) ? dto.DietName : dto.DietType.ToString());
             var dietType = registeredUser != null ? registeredUser.DietType : dto.DietType;
             var friendName = registeredUser?.FullName ?? dto.FriendName;
 
+            // Check for existing friendship / pending request
+            const string existingSql = @"
+                SELECT TOP 1 connection_id AS ConnectionId, user_id AS UserId, friend_user_id AS FriendUserId,
+                       friend_phone AS FriendPhone, friend_name AS FriendName,
+                       diet_type AS DietType, diet_name AS DietName, status AS Status,
+                       requester_id AS RequesterId, receiver_id AS ReceiverId, created_at AS CreatedAt
+                FROM FriendConnections
+                WHERE (
+                    (user_id = @CurrentUserId AND (friend_user_id = @TargetUserId OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10)))
+                    OR (@TargetUserId IS NOT NULL AND user_id = @TargetUserId AND (friend_user_id = @CurrentUserId OR (@CurLast10 <> '' AND RIGHT(friend_phone, 10) = @CurLast10)))
+                    OR (receiver_id = @CurrentUserId AND (requester_id = @TargetUserId OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10)))
+                    OR (requester_id = @CurrentUserId AND (receiver_id = @TargetUserId OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10)))
+                )
+                ORDER BY created_at DESC";
+
+            var existing = await conn.QueryFirstOrDefaultAsync<FriendDto>(existingSql, new
+            {
+                CurrentUserId = currentUserId,
+                TargetUserId = targetUserId,
+                Last10 = last10,
+                CurLast10 = curLast10
+            });
+
+            if (existing != null)
+            {
+                if (existing.Status == "ACCEPTED")
+                {
+                    _logger.LogInformation("Friendship already exists between {User1} and {User2}", currentUserId, targetUserId ?? cleanPhone);
+                    return existing;
+                }
+
+                if (existing.Status == "PENDING")
+                {
+                    var isExistingSender = existing.RequesterId == currentUserId || (existing.RequesterId == null && existing.UserId == currentUserId);
+                    if (isExistingSender)
+                    {
+                        // Duplicate request from same sender
+                        _logger.LogInformation("Pending friend request already exists from {UserId} to {Target}", currentUserId, targetUserId ?? cleanPhone);
+                        return existing;
+                    }
+                    else
+                    {
+                        // Reciprocal request! Auto-accept safely
+                        await conn.ExecuteAsync("UPDATE FriendConnections SET status = 'ACCEPTED' WHERE connection_id = @ConnectionId", new { ConnectionId = existing.ConnectionId });
+                        existing.Status = "ACCEPTED";
+                        _logger.LogInformation("Reciprocal request detected: Auto-accepted connection {ConnectionId}", existing.ConnectionId);
+                        return existing;
+                    }
+                }
+
+                // If REJECTED or CANCELLED, re-open to PENDING
+                if (existing.Status == "REJECTED" || existing.Status == "CANCELLED")
+                {
+                    await conn.ExecuteAsync(
+                        @"UPDATE FriendConnections 
+                          SET status = 'PENDING', requester_id = @CurrentUserId, receiver_id = @TargetUserId,
+                              friend_name = @FriendName, diet_type = @DietType, diet_name = @DietName, created_at = GETDATE()
+                          WHERE connection_id = @ConnectionId",
+                        new
+                        {
+                            ConnectionId = existing.ConnectionId,
+                            CurrentUserId = currentUserId,
+                            TargetUserId = targetUserId,
+                            FriendName = friendName,
+                            DietType = (int)dietType,
+                            DietName = dietName
+                        });
+
+                    existing.Status = "PENDING";
+                    existing.RequesterId = currentUserId;
+                    existing.ReceiverId = targetUserId;
+                    return existing;
+                }
+            }
+
+            // Fresh Request: Create PENDING friend request
+            var connectionId = Guid.NewGuid().ToString();
             const string sql = @"
                 INSERT INTO FriendConnections (connection_id, user_id, friend_user_id, friend_phone, friend_name, diet_type, diet_name, status, requester_id, receiver_id, created_at)
-                VALUES (@ConnectionId, @UserId, @FriendUserId, @FriendPhone, @FriendName, @DietType, @DietName, 'ACCEPTED', @RequesterId, @ReceiverId, GETDATE())";
+                VALUES (@ConnectionId, @UserId, @FriendUserId, @FriendPhone, @FriendName, @DietType, @DietName, 'PENDING', @RequesterId, @ReceiverId, GETDATE())";
 
             await conn.ExecuteAsync(sql, new
             {
                 ConnectionId = connectionId,
                 UserId = currentUserId,
-                FriendUserId = registeredUser?.UserId,
+                FriendUserId = targetUserId,
                 FriendPhone = cleanPhone,
                 FriendName = friendName,
                 DietType = (int)dietType,
                 DietName = dietName,
                 RequesterId = currentUserId,
-                ReceiverId = registeredUser?.UserId
+                ReceiverId = targetUserId
             });
 
-            _logger.LogInformation("Friend connection created between {UserId} and phone {FriendPhone}", currentUserId, cleanPhone);
+            _logger.LogInformation("Friend request sent from {UserId} to phone {FriendPhone} (status: PENDING)", currentUserId, cleanPhone);
 
             return new FriendDto
             {
                 ConnectionId = connectionId,
                 UserId = currentUserId,
-                FriendUserId = registeredUser?.UserId,
+                FriendUserId = targetUserId,
                 FriendPhone = cleanPhone,
                 FriendName = friendName,
                 DietType = dietType,
                 DietName = dietName,
-                Status = "ACCEPTED",
+                Status = "PENDING",
                 RequesterId = currentUserId,
-                ReceiverId = registeredUser?.UserId,
+                ReceiverId = targetUserId,
                 IsIncoming = false,
                 CreatedAt = DateTime.UtcNow
             };
@@ -207,13 +298,64 @@ public class FriendDataService : IFriendDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
-            var rows = await conn.ExecuteAsync(
-                @"UPDATE FriendConnections SET status = @Status 
-                  WHERE connection_id = @ConnectionId 
-                    AND (user_id = @UserId OR friend_user_id = @UserId OR receiver_id = @UserId)",
-                new { ConnectionId = connectionId, UserId = userId, Status = status.ToUpper() });
+            const string selectSql = @"
+                SELECT connection_id AS ConnectionId, user_id AS UserId, friend_user_id AS FriendUserId,
+                       status AS Status, requester_id AS RequesterId, receiver_id AS ReceiverId
+                FROM FriendConnections
+                WHERE connection_id = @ConnectionId";
 
-            _logger.LogInformation("Friend connection {ConnectionId} status updated to {Status}", connectionId, status);
+            var record = await conn.QuerySingleOrDefaultAsync<dynamic>(selectSql, new { ConnectionId = connectionId });
+            if (record == null)
+            {
+                _logger.LogWarning("Friend connection {ConnectionId} not found", connectionId);
+                return false;
+            }
+
+            string currentStatus = ((string)record.Status).ToUpperInvariant();
+            string? requesterId = (string?)record.RequesterId ?? (string?)record.UserId;
+            string? receiverId = (string?)record.ReceiverId ?? (string?)record.FriendUserId;
+
+            var newStatus = status.Trim().ToUpperInvariant();
+
+            // Validate state transitions: PENDING -> ACCEPTED, PENDING -> REJECTED, PENDING -> CANCELLED
+            if (currentStatus == "PENDING")
+            {
+                if (newStatus == "ACCEPTED" || newStatus == "REJECTED")
+                {
+                    // Only recipient can accept or reject
+                    if (userId != receiverId)
+                    {
+                        _logger.LogWarning("Unauthorized: User {UserId} cannot accept/reject request intended for {ReceiverId}", userId, receiverId);
+                        return false;
+                    }
+                }
+                else if (newStatus == "CANCELLED")
+                {
+                    // Only requester/sender can cancel
+                    if (userId != requesterId)
+                    {
+                        _logger.LogWarning("Unauthorized: User {UserId} cannot cancel request initiated by {RequesterId}", userId, requesterId);
+                        return false;
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("Invalid transition from PENDING to {NewStatus}", newStatus);
+                    return false;
+                }
+            }
+            else
+            {
+                // Cannot transition non-PENDING status (e.g. ACCEPTED -> REJECTED or REJECTED -> ACCEPTED directly)
+                _logger.LogWarning("Invalid transition: Cannot change connection {ConnectionId} from {CurrentStatus} to {NewStatus}", connectionId, currentStatus, newStatus);
+                return false;
+            }
+
+            var rows = await conn.ExecuteAsync(
+                "UPDATE FriendConnections SET status = @Status WHERE connection_id = @ConnectionId",
+                new { ConnectionId = connectionId, Status = newStatus });
+
+            _logger.LogInformation("Friend connection {ConnectionId} status transitioned: {CurrentStatus} -> {Status}", connectionId, currentStatus, newStatus);
             return rows > 0;
         }
         catch (Exception ex)
@@ -231,7 +373,7 @@ public class FriendDataService : IFriendDataService
             var rows = await conn.ExecuteAsync(
                 @"DELETE FROM FriendConnections 
                   WHERE connection_id = @ConnectionId 
-                    AND (user_id = @UserId OR friend_user_id = @UserId OR receiver_id = @UserId)",
+                    AND (user_id = @UserId OR friend_user_id = @UserId OR receiver_id = @UserId OR requester_id = @UserId)",
                 new { ConnectionId = connectionId, UserId = userId });
 
             _logger.LogInformation("Friend connection {ConnectionId} deleted", connectionId);
