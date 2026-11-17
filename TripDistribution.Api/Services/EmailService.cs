@@ -21,6 +21,24 @@ public class EmailService : IEmailService
         _logger = logger;
         _settings = new EmailSettings();
         configuration.GetSection("EmailSettings").Bind(_settings);
+
+        // Support environment variable overrides
+        var envPassword = Environment.GetEnvironmentVariable("EmailSettings__SmtpPassword") 
+                       ?? Environment.GetEnvironmentVariable("EmailSettings__Password");
+        if (!string.IsNullOrWhiteSpace(envPassword))
+        {
+            _settings.Password = envPassword;
+        }
+
+        var envUsername = Environment.GetEnvironmentVariable("EmailSettings__Username");
+        if (!string.IsNullOrWhiteSpace(envUsername))
+        {
+            _settings.Username = envUsername;
+            if (string.IsNullOrWhiteSpace(_settings.FromEmail) || _settings.FromEmail.Contains("example.com"))
+            {
+                _settings.FromEmail = envUsername;
+            }
+        }
     }
 
     public async Task<bool> SendOtpEmailAsync(string toEmail, string otpCode, string purpose, string? recipientName = null)
@@ -30,6 +48,14 @@ public class EmailService : IEmailService
             if (string.IsNullOrWhiteSpace(toEmail) || !toEmail.Contains('@'))
             {
                 _logger.LogWarning("Invalid destination email address: {ToEmail}", toEmail);
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(_settings.Username) || 
+                string.IsNullOrWhiteSpace(_settings.Password) || 
+                _settings.Username.Contains("example.com"))
+            {
+                _logger.LogWarning("SMTP credentials not configured (Username/Password empty or placeholder). Mocking email delivery to {ToEmail}. OTP Code is: {OtpCode}", toEmail, otpCode);
                 return false;
             }
 
@@ -79,8 +105,10 @@ public class EmailService : IEmailService
 
             using var smtp = new SmtpClient(_settings.Host, _settings.Port)
             {
-                Credentials = new NetworkCredential(_settings.Username, _settings.Password),
                 EnableSsl = true,
+                UseDefaultCredentials = false,
+                DeliveryMethod = SmtpDeliveryMethod.Network,
+                Credentials = new NetworkCredential(_settings.Username, _settings.Password),
                 Timeout = 15000
             };
 
