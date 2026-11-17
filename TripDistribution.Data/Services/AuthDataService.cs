@@ -1,3 +1,4 @@
+using System.Linq;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using TripDistribution.Data.Connection;
@@ -85,6 +86,8 @@ public class AuthDataService : IAuthDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
+            
+            // 1. First, search directly with the provided identifiers (including exact country code + phone)
             const string sql = @"
                 SELECT TOP 1 user_id AS UserId, phone_number AS PhoneNumber, email AS Email, username AS Username, full_name AS FullName, 
                        password_hash AS PasswordHash, auth_token AS AuthToken, token_expiry AS TokenExpiry,
@@ -96,7 +99,34 @@ public class AuthDataService : IAuthDataService
                    OR (@Username IS NOT NULL AND @Username <> '' AND username = @Username)
                    OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
                    OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone)";
-            return await conn.QuerySingleOrDefaultAsync<User>(sql, new { UserId = userId, Username = username, Email = email, Phone = phone });
+            var user = await conn.QuerySingleOrDefaultAsync<User>(sql, new { UserId = userId, Username = username, Email = email, Phone = phone });
+            if (user != null) return user;
+
+            // 2. Secondary fallback search by phone without country code or ending digits if not found initially
+            if (!string.IsNullOrWhiteSpace(phone))
+            {
+                var cleanDigits = new string(phone.Where(char.IsDigit).ToArray());
+                var rawPhone = cleanDigits.Length >= 10 
+                    ? cleanDigits.Substring(cleanDigits.Length - 10) 
+                    : cleanDigits;
+
+                if (!string.IsNullOrEmpty(rawPhone))
+                {
+                    const string fallbackSql = @"
+                        SELECT TOP 1 user_id AS UserId, phone_number AS PhoneNumber, email AS Email, username AS Username, full_name AS FullName, 
+                               password_hash AS PasswordHash, auth_token AS AuthToken, token_expiry AS TokenExpiry,
+                               diet_type AS DietType, diet_name AS DietName, avatar_color AS AvatarColor,
+                               is_biometric_enabled AS IsBiometricEnabled, is_active AS IsActive,
+                               created_at AS CreatedAt, updated_at AS UpdatedAt, last_login_at AS LastLoginAt
+                        FROM Users 
+                        WHERE phone_number = @RawPhone
+                           OR phone_number LIKE '%' + @RawPhone";
+                    user = await conn.QuerySingleOrDefaultAsync<User>(fallbackSql, new { RawPhone = rawPhone });
+                    if (user != null) return user;
+                }
+            }
+
+            return null;
         }
         catch (Exception ex)
         {
