@@ -5,6 +5,7 @@ namespace TripDistribution.Model.DTOs.Auth;
 public class RegisterRequestDto
 {
     public string Phone { get; set; } = string.Empty;
+    public string? CountryCode { get; set; }
     public string? Email { get; set; }
     public string? Username { get; set; }
     public string FullName { get; set; } = string.Empty;

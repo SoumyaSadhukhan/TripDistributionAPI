@@ -25,6 +25,7 @@ public class AuthController : ControllerBase
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IEmailService _emailService;
+    private readonly IPhoneVerificationService _phoneVerificationService;
     private readonly IConfiguration _configuration;
     private readonly IHostEnvironment _environment;
     private readonly ILogger<AuthController> _logger;
@@ -36,6 +37,7 @@ public class AuthController : ControllerBase
         ICurrentUserContext currentUserContext,
         IPasswordHasher passwordHasher,
         IEmailService emailService,
+        IPhoneVerificationService phoneVerificationService,
         IConfiguration configuration,
         IHostEnvironment environment,
         ILogger<AuthController> logger)
@@ -46,6 +48,7 @@ public class AuthController : ControllerBase
         _currentUserContext = currentUserContext;
         _passwordHasher = passwordHasher;
         _emailService = emailService;
+        _phoneVerificationService = phoneVerificationService;
         _configuration = configuration;
         _environment = environment;
         _logger = logger;
@@ -67,6 +70,25 @@ public class AuthController : ControllerBase
             if (dto.Password.Length < 6)
                 return BadRequest(ApiResponse.Fail("Password must be at least 6 characters long."));
 
+            // 1. One registration time check: Validate mobile phone number via Veriphone (Bypassed in DEBUG)
+            if (!string.IsNullOrWhiteSpace(dto.Phone))
+            {
+                var fullPhone = !string.IsNullOrWhiteSpace(dto.CountryCode) && !dto.Phone.StartsWith("+")
+                    ? $"{dto.CountryCode.Trim()}{dto.Phone.Trim()}"
+                    : dto.Phone.Trim();
+
+                var (isValidPhone, phoneError, e164, carrier) = await _phoneVerificationService.VerifyPhoneAsync(fullPhone);
+                if (!isValidPhone)
+                {
+                    return BadRequest(ApiResponse.Fail(phoneError ?? "The phone number provided is not a valid mobile number."));
+                }
+
+                if (!string.IsNullOrWhiteSpace(e164))
+                {
+                    dto.Phone = e164;
+                }
+            }
+
             var existing = await _authDataService.FindUserAsync(null, dto.Username, dto.Email, dto.Phone);
             if (existing != null)
                 return BadRequest(ApiResponse.Fail("An account with this email, phone, or username already exists."));
@@ -74,10 +96,10 @@ public class AuthController : ControllerBase
             // Secure PBKDF2 Password Hashing
             var passwordHash = _passwordHasher.HashPassword(dto.Password);
 
-            // 1. Create user row in database and generate UserId
+            // 2. Create user row in database and generate UserId
             var user = await _authDataService.CreateUserAsync(dto, passwordHash);
 
-            // 2. Dispatch verification OTP via email if email is provided
+            // 3. Dispatch verification OTP via email if email is provided
             bool emailSent = false;
             string? otpCode = null;
             if (!string.IsNullOrWhiteSpace(user.Email) && user.Email.Contains('@'))
