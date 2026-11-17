@@ -96,19 +96,31 @@ public class FriendDataService : IFriendDataService
             var last10 = cleanPhone.Length >= 10 ? cleanPhone[^10..] : cleanPhone;
 
             const string sql = @"
-                SELECT connection_id AS ConnectionId, user_id AS UserId, friend_user_id AS FriendUserId,
-                       friend_phone AS FriendPhone, friend_name AS FriendName,
-                       diet_type AS DietType, diet_name AS DietName, status AS Status,
-                       requester_id AS RequesterId, receiver_id AS ReceiverId,
-                       CASE WHEN receiver_id = @UserId OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10 AND user_id <> @UserId) THEN 1 ELSE 0 END AS IsIncoming,
-                       created_at AS CreatedAt
-                FROM FriendConnections
-                WHERE (user_id = @UserId 
-                   OR friend_user_id = @UserId 
-                   OR receiver_id = @UserId
-                   OR (@Last10 <> '' AND RIGHT(friend_phone, 10) = @Last10))
-                  AND status = 'ACCEPTED'
-                ORDER BY created_at DESC";
+                SELECT 
+                    fc.connection_id AS ConnectionId, 
+                    @UserId AS UserId, 
+                    CASE WHEN fc.user_id = @UserId THEN fc.friend_user_id ELSE fc.user_id END AS FriendUserId,
+                    COALESCE(CASE WHEN fc.user_id = @UserId THEN u2.phone_number ELSE u1.phone_number END, fc.friend_phone, '') AS FriendPhone,
+                    COALESCE(CASE WHEN fc.user_id = @UserId THEN u2.full_name ELSE u1.full_name END,
+                             CASE WHEN fc.user_id = @UserId THEN u2.username ELSE u1.username END,
+                             fc.friend_name,
+                             'Friend') AS FriendName,
+                    COALESCE(CASE WHEN fc.user_id = @UserId THEN u2.diet_type ELSE u1.diet_type END, fc.diet_type) AS DietType,
+                    COALESCE(CASE WHEN fc.user_id = @UserId THEN u2.diet_name ELSE u1.diet_name END, fc.diet_name, 'Vegetarian') AS DietName,
+                    fc.status AS Status,
+                    fc.requester_id AS RequesterId, 
+                    fc.receiver_id AS ReceiverId,
+                    CASE WHEN fc.receiver_id = @UserId OR (@Last10 <> '' AND RIGHT(fc.friend_phone, 10) = @Last10 AND fc.user_id <> @UserId) THEN 1 ELSE 0 END AS IsIncoming,
+                    fc.created_at AS CreatedAt
+                FROM FriendConnections fc
+                LEFT JOIN Users u1 ON u1.user_id = fc.user_id
+                LEFT JOIN Users u2 ON (u2.user_id = fc.friend_user_id OR (u2.phone_number IS NOT NULL AND fc.friend_phone IS NOT NULL AND RIGHT(u2.phone_number, 10) = RIGHT(fc.friend_phone, 10)))
+                WHERE (fc.user_id = @UserId 
+                   OR fc.friend_user_id = @UserId 
+                   OR fc.receiver_id = @UserId
+                   OR (@Last10 <> '' AND RIGHT(fc.friend_phone, 10) = @Last10))
+                  AND fc.status = 'ACCEPTED'
+                ORDER BY fc.created_at DESC";
 
             return await conn.QueryAsync<FriendDto>(sql, new { UserId = userId, Last10 = last10 });
         }
@@ -125,15 +137,26 @@ public class FriendDataService : IFriendDataService
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             const string sql = @"
-                SELECT connection_id AS ConnectionId, user_id AS UserId, friend_user_id AS FriendUserId,
-                       friend_phone AS FriendPhone, friend_name AS FriendName,
-                       diet_type AS DietType, diet_name AS DietName, status AS Status,
-                       requester_id AS RequesterId, receiver_id AS ReceiverId,
-                       1 AS IsIncoming, created_at AS CreatedAt
-                FROM FriendConnections
-                WHERE (receiver_id = @UserId OR (friend_user_id = @UserId AND (requester_id IS NULL OR requester_id <> @UserId)))
-                  AND status = 'PENDING'
-                ORDER BY created_at DESC";
+                SELECT 
+                    fc.connection_id AS ConnectionId, 
+                    @UserId AS UserId, 
+                    fc.user_id AS FriendUserId,
+                    COALESCE(u_req.phone_number, fc.friend_phone, '') AS FriendPhone,
+                    COALESCE(u_req.full_name, u_req.username, fc.friend_name, 'Member') AS FriendName,
+                    COALESCE(u_req.diet_type, fc.diet_type) AS DietType,
+                    COALESCE(u_req.diet_name, fc.diet_name, 'Vegetarian') AS DietName,
+                    fc.status AS Status,
+                    fc.requester_id AS RequesterId, 
+                    fc.receiver_id AS ReceiverId,
+                    COALESCE(u_req.full_name, u_req.username, 'Member') AS RequesterName,
+                    COALESCE(u_req.phone_number, '') AS RequesterPhone,
+                    1 AS IsIncoming, 
+                    fc.created_at AS CreatedAt
+                FROM FriendConnections fc
+                LEFT JOIN Users u_req ON u_req.user_id = COALESCE(fc.requester_id, fc.user_id)
+                WHERE (fc.receiver_id = @UserId OR (fc.friend_user_id = @UserId AND (fc.requester_id IS NULL OR fc.requester_id <> @UserId)))
+                  AND fc.status = 'PENDING'
+                ORDER BY fc.created_at DESC";
 
             return await conn.QueryAsync<FriendDto>(sql, new { UserId = userId });
         }

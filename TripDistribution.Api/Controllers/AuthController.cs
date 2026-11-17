@@ -309,6 +309,9 @@ public class AuthController : ControllerBase
                 targetUser = await _authDataService.FindUserAsync(targetUserId, dto.Username, dto.Email, dto.Phone);
             }
 
+            var isProductionMode = string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(dto.Environment, "prod", StringComparison.OrdinalIgnoreCase);
+
             if (targetUser == null)
             {
                 // Account Enumeration Defense: For FORGOT_PASSWORD, return generic success so account existence is not leaked
@@ -322,16 +325,65 @@ public class AuthController : ControllerBase
                     }));
                 }
 
+                if (string.Equals(dto.Purpose, "REGISTER", StringComparison.OrdinalIgnoreCase))
+                {
+                    string? regEmail = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : null;
+                    string? regPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : null;
+                    if (string.IsNullOrWhiteSpace(regEmail) && string.IsNullOrWhiteSpace(regPhone))
+                    {
+                        return BadRequest(ApiResponse.Fail("Email address is required to receive registration verification OTP."));
+                    }
+
+                    var isDev = _environment.IsDevelopment();
+                    var bypassInDebug = !isProductionMode && isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+                    var regOtpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+
+                    var regSaved = await _authDataService.SaveOtpAsync(null, regEmail, regPhone, regOtpCode, "REGISTER");
+                    if (!regSaved)
+                        return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
+
+                    bool regEmailSent = false;
+                    if (!string.IsNullOrWhiteSpace(regEmail) && regEmail.Contains('@'))
+                    {
+                        if (isProductionMode || !bypassInDebug)
+                        {
+                            regEmailSent = await _emailService.SendOtpEmailAsync(regEmail, regOtpCode, "REGISTER", dto.Username ?? "Member");
+                        }
+                        else
+                        {
+                            regEmailSent = true;
+                        }
+                    }
+
+                    var exposeOtp = !isProductionMode && isDev && _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
+                    var regResponseData = new
+                    {
+                        Email = regEmail,
+                        Phone = regPhone,
+                        EmailSent = regEmailSent,
+                        OtpCode = exposeOtp ? regOtpCode : null,
+                        Message = regEmailSent ? $"Verification OTP sent successfully to email: {regEmail}" : "OTP generated successfully."
+                    };
+
+                    return Ok(ApiResponse<object>.Ok(regResponseData));
+                }
+
                 return NotFound(ApiResponse.Fail("No valid user account found with the provided details."));
+            }
+
+            // If targetUser exists and purpose is REGISTER
+            if (string.Equals(dto.Purpose, "REGISTER", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(ApiResponse.Fail("An account with this email or phone number already exists. Please sign in instead."));
             }
 
             string? destEmail = !string.IsNullOrWhiteSpace(dto.Email) ? dto.Email : targetUser.Email;
             string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser.PhoneNumber;
             string displayName = targetUser.FullName ?? targetUser.Username ?? "Member";
 
-            var isDev = _environment.IsDevelopment();
-            var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
-            var otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+            var isDevTarget = _environment.IsDevelopment();
+            var bypassInDebugTarget = !isProductionMode && isDevTarget && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
+            var otpCode = bypassInDebugTarget ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
 
             var saved = await _authDataService.SaveOtpAsync(targetUser.UserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper());
             if (!saved)
@@ -340,7 +392,7 @@ public class AuthController : ControllerBase
             bool emailSent = false;
             if (!string.IsNullOrWhiteSpace(destEmail) && destEmail.Contains('@'))
             {
-                if (!bypassInDebug)
+                if (isProductionMode || !bypassInDebugTarget)
                 {
                     emailSent = await _emailService.SendOtpEmailAsync(destEmail, otpCode, dto.Purpose, displayName);
                 }
@@ -353,14 +405,14 @@ public class AuthController : ControllerBase
             _logger.LogInformation("OTP dispatched: UserId: {UserId}, Email: {Email}, Phone: {Phone}, EmailSent: {EmailSent}", 
                 targetUser.UserId, destEmail, destPhone, emailSent);
 
-            var exposeOtp = isDev && _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
+            var exposeOtpTarget = !isProductionMode && isDevTarget && _configuration.GetValue<bool>("AuthSettings:ExposeOtpInResponse", false);
             var responseData = new
             {
                 UserId = targetUser.UserId,
                 Email = destEmail,
                 Phone = destPhone,
                 EmailSent = emailSent,
-                OtpCode = (exposeOtp || bypassInDebug) ? otpCode : null,
+                OtpCode = exposeOtpTarget ? otpCode : null,
                 Message = emailSent ? $"OTP sent successfully to email: {destEmail}" : "OTP generated successfully."
             };
 

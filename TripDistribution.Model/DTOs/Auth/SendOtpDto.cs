@@ -7,4 +7,5 @@ public class SendOtpDto
     public string? Email { get; set; }
     public string? Phone { get; set; }
     public string Purpose { get; set; } = "REGISTER"; // REGISTER, FORGOT_PASSWORD, LOGIN
+    public string? Environment { get; set; } // "debug" or "production"
 }

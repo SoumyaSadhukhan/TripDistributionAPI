@@ -14,15 +14,18 @@ namespace TripDistribution.Api.Controllers;
 public class FriendsController : ControllerBase
 {
     private readonly IFriendDataService _friendDataService;
+    private readonly INotificationDataService _notificationDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly ILogger<FriendsController> _logger;
 
     public FriendsController(
         IFriendDataService friendDataService,
+        INotificationDataService notificationDataService,
         ICurrentUserContext currentUserContext,
         ILogger<FriendsController> logger)
     {
         _friendDataService = friendDataService;
+        _notificationDataService = notificationDataService;
         _currentUserContext = currentUserContext;
         _logger = logger;
     }
@@ -95,7 +98,22 @@ public class FriendsController : ControllerBase
             var result = await _friendDataService.AddOrInviteFriendAsync(userId, phone, dto);
             _logger.LogInformation("Friend request processed for phone {FriendPhone} by user {UserId} with status {Status}", dto.FriendPhone, userId, result.Status);
 
-            var message = result.Status == "PENDING" ? "Friend request sent successfully." : "Friend connection established.";
+            if (!string.IsNullOrEmpty(result.ReceiverId) && result.ReceiverId != userId)
+            {
+                var senderName = _currentUserContext.FullName ?? "A trip member";
+                await _notificationDataService.CreateNotificationAsync(new TripDistribution.Model.Entities.Notification
+                {
+                    NotificationId = Guid.NewGuid().ToString(),
+                    UserId = result.ReceiverId,
+                    Title = "Trip Friend Request",
+                    Message = $"{senderName} sent you a trip friend request.",
+                    Type = "FRIEND_REQUEST"
+                });
+            }
+
+            var message = result.Status == "PENDING" 
+                ? $"Friend request sent to {dto.FriendName} successfully." 
+                : $"Connected with {dto.FriendName} successfully.";
             return Ok(ApiResponse<FriendDto>.Ok(result, message));
         }
         catch (InvalidOperationException ex)
@@ -159,6 +177,31 @@ public class FriendsController : ControllerBase
             var updated = await _friendDataService.UpdateFriendStatusAsync(id, userId, dto.Status);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Friend connection not found or unauthorized."));
+
+            if (dto.Status.Equals("ACCEPTED", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    var friends = await _friendDataService.GetFriendsAsync(userId, _currentUserContext.PhoneNumber);
+                    var conn = friends.FirstOrDefault(f => f.ConnectionId == id);
+                    if (conn != null && !string.IsNullOrEmpty(conn.FriendUserId))
+                    {
+                        var accepterName = _currentUserContext.FullName ?? "A trip member";
+                        await _notificationDataService.CreateNotificationAsync(new TripDistribution.Model.Entities.Notification
+                        {
+                            NotificationId = Guid.NewGuid().ToString(),
+                            UserId = conn.FriendUserId,
+                            Title = "Friend Request Accepted",
+                            Message = $"{accepterName} accepted your trip friend request.",
+                            Type = "FRIEND_ACCEPTED"
+                        });
+                    }
+                }
+                catch (Exception notifEx)
+                {
+                    _logger.LogWarning(notifEx, "Failed to send acceptance notification for connection {ConnectionId}", id);
+                }
+            }
 
             _logger.LogInformation("Friend connection {ConnectionId} status updated to {Status}", id, dto.Status);
             return Ok(ApiResponse.Ok("Friend connection status updated."));

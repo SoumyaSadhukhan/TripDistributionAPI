@@ -39,6 +39,8 @@ public class FriendDto
     public string Status { get; set; } = "ACCEPTED";
     public string? RequesterId { get; set; }
     public string? ReceiverId { get; set; }
+    public string? RequesterName { get; set; }
+    public string? RequesterPhone { get; set; }
     public bool IsIncoming { get; set; }
     public DateTime CreatedAt { get; set; }
 }

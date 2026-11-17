@@ -122,18 +122,22 @@ public class AuthDataService : IAuthDataService
                   AND purpose = @Purpose 
                   AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
                     OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
-                    OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))";
+                    OR (@Phone IS NOT NULL AND @Phone <> '' AND @Phone <> 'EMAIL_ONLY' AND phone_number = @Phone))";
             await conn.ExecuteAsync(invalidateSql, new { UserId = userId, Email = email, Phone = phone, Purpose = purpose });
 
             const string sql = @"
                 INSERT INTO OtpVerification (otp_id, user_id, phone_number, email, otp_code, purpose, is_verified, expires_at, created_at)
                 VALUES (@OtpId, @UserId, @Phone, @Email, @OtpCode, @Purpose, 0, @ExpiresAt, GETDATE())";
 
+            string dbPhone = !string.IsNullOrWhiteSpace(phone)
+                ? (phone.Length > 20 ? phone.Substring(0, 20) : phone)
+                : "EMAIL_ONLY";
+
             var rows = await conn.ExecuteAsync(sql, new
             {
                 OtpId = Guid.NewGuid().ToString(),
                 UserId = userId,
-                Phone = !string.IsNullOrWhiteSpace(phone) ? phone : (userId ?? email ?? "N/A"),
+                Phone = dbPhone,
                 Email = email,
                 OtpCode = otpCode,
                 Purpose = purpose,
@@ -171,7 +175,7 @@ public class AuthDataService : IAuthDataService
                       AND expires_at >= GETUTCDATE()
                       AND ((@UserId IS NOT NULL AND @UserId <> '' AND user_id = @UserId)
                         OR (@Email IS NOT NULL AND @Email <> '' AND email = @Email)
-                        OR (@Phone IS NOT NULL AND @Phone <> '' AND phone_number = @Phone))
+                        OR (@Phone IS NOT NULL AND @Phone <> '' AND @Phone <> 'EMAIL_ONLY' AND phone_number = @Phone))
                     ORDER BY created_at DESC
                 )
                 UPDATE TargetOtp
