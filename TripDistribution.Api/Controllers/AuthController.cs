@@ -309,7 +309,9 @@ public class AuthController : ControllerBase
                 targetUser = await _authDataService.FindUserAsync(targetUserId, dto.Username, dto.Email, dto.Phone);
             }
 
-            var isProductionMode = string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
+            var configuredEnv = (_configuration["Environment"] ?? "DEBUG").Trim().ToUpperInvariant();
+            var isProductionMode = string.Equals(configuredEnv, "PRODUCTION", StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
                                    string.Equals(dto.Environment, "prod", StringComparison.OrdinalIgnoreCase);
 
             if (targetUser == null)

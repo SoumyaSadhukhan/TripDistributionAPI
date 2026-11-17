@@ -144,8 +144,18 @@ public class AuthDataService : IAuthDataService
                 ExpiresAt = DateTime.UtcNow.AddMinutes(expiryMinutes)
             });
 
-            _logger.LogInformation("Saved OTP for user: {UserId}, email: {Email}, phone: {Phone}, purpose: {Purpose}", userId, email, phone, purpose);
-            Console.WriteLine($"OTP for {(email ?? phone ?? userId)} is: {otpCode}");
+            var isDebug = !string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase) 
+                       && !string.Equals(Environment.GetEnvironmentVariable("Environment"), "PRODUCTION", StringComparison.OrdinalIgnoreCase);
+
+            if (isDebug)
+            {
+                _logger.LogInformation("[DEBUG OTP] User: {UserId}, Email: {Email}, Phone: {Phone}, Purpose: {Purpose}, OTP: {OtpCode}", userId, email, phone, purpose, otpCode);
+                Console.WriteLine($"[DEBUG OTP] Destination: {(email ?? phone ?? userId)} | OTP: {otpCode}");
+            }
+            else
+            {
+                _logger.LogInformation("Saved OTP for verification purpose: {Purpose}", purpose);
+            }
             return rows > 0;
         }
         catch (Exception ex)

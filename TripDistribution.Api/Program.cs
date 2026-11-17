@@ -339,6 +339,9 @@ app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Environment-driven Request & Response Logging Middleware (DEBUG: Full DTO & User info | PRODUCTION: Status only)
+app.UseMiddleware<EnvironmentLoggingMiddleware>();
+
 app.MapControllers();
 
 app.Run();
