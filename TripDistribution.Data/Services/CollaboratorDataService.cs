@@ -192,8 +192,11 @@ public class CollaboratorDataService : ICollaboratorDataService
                   AND @Last10 <> '' AND RIGHT(phone_number, 10) = @Last10;
 
                 UPDATE Notifications
-                SET is_read = 1
-                WHERE user_id = @UserId AND trip_id = @TripId AND type IN ('TRIP_INVITE', 'COLLAB_INVITE');";
+                SET is_read = 1,
+                    type = 'TRIP_INVITE_ACCEPTED',
+                    title = 'Trip Request Accepted',
+                    message = 'You accepted the trip request' + CASE WHEN trip_name IS NOT NULL AND trip_name <> '' THEN ' to join ""' + trip_name + '""' ELSE '' END
+                WHERE user_id = @UserId AND trip_id = @TripId AND type IN ('TRIP_INVITE', 'COLLAB_INVITE', 'TRIP_INVITE_ACCEPTED');";
 
             await conn.ExecuteAsync(sql, new { TripId = tripId, UserId = userId, Phone = phone, Last10 = last10 });
             _logger.LogInformation("Trip invite accepted for trip {TripId} by user {UserId}", tripId, userId);
@@ -221,8 +224,11 @@ public class CollaboratorDataService : ICollaboratorDataService
                   AND (user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10));
 
                 UPDATE Notifications
-                SET is_read = 1
-                WHERE user_id = @UserId AND trip_id = @TripId AND type IN ('TRIP_INVITE', 'COLLAB_INVITE');";
+                SET is_read = 1,
+                    type = 'TRIP_INVITE_DECLINED',
+                    title = 'Trip Request Declined',
+                    message = 'You declined the trip request' + CASE WHEN trip_name IS NOT NULL AND trip_name <> '' THEN ' to join ""' + trip_name + '""' ELSE '' END
+                WHERE user_id = @UserId AND trip_id = @TripId AND type IN ('TRIP_INVITE', 'COLLAB_INVITE', 'TRIP_INVITE_DECLINED');";
 
             await conn.ExecuteAsync(sql, new { TripId = tripId, UserId = userId, Last10 = last10 });
             _logger.LogInformation("Trip invite declined for trip {TripId} by user {UserId}", tripId, userId);

@@ -5,6 +5,7 @@ using TripDistribution.Api.Services;
 using TripDistribution.Data.Services;
 using TripDistribution.Model.DTOs.Common;
 using TripDistribution.Model.DTOs.Trips;
+using TripDistribution.Model.Entities;
 
 namespace TripDistribution.Api.Controllers;
 
@@ -219,7 +220,10 @@ public class TripsController : ControllerBase
     }
 
     [HttpPost("{tripId}/accept-invite")]
-    public async Task<IActionResult> AcceptTripInvite(string tripId, [FromServices] ICollaboratorDataService collaboratorDataService)
+    public async Task<IActionResult> AcceptTripInvite(
+        string tripId,
+        [FromServices] ICollaboratorDataService collaboratorDataService,
+        [FromServices] INotificationDataService notificationDataService)
     {
         try
         {
@@ -232,8 +236,32 @@ public class TripsController : ControllerBase
             if (!success)
                 return BadRequest(ApiResponse.Fail("Failed to accept trip invitation."));
 
-            await _activityLogDataService.LogActivityAsync(userId, tripId, "ACCEPT_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} joined the trip");
+            var userName = _currentUserContext.FullName ?? "User";
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "ACCEPT_TRIP_INVITE", $"{userName} joined the trip");
             _logger.LogInformation("User {UserId} accepted invite to trip {TripId}", userId, tripId);
+
+            // Notify trip owner that user accepted the trip request
+            try
+            {
+                var trip = await _tripDataService.GetTripDetailAsync(tripId, userId);
+                if (trip != null && !string.IsNullOrEmpty(trip.UserId) && trip.UserId != userId)
+                {
+                    await notificationDataService.CreateNotificationAsync(new Notification
+                    {
+                        NotificationId = Guid.NewGuid().ToString(),
+                        UserId = trip.UserId,
+                        TripId = tripId,
+                        TripName = trip.Name,
+                        Title = "Trip Request Accepted",
+                        Message = $"{userName} accepted the trip request to join \"{trip.Name}\"",
+                        Type = "TRIP_INVITE_ACCEPTED"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not notify owner of accepted trip invite for trip {TripId}", tripId);
+            }
 
             return Ok(ApiResponse.Ok("Joined trip successfully."));
         }
@@ -245,7 +273,10 @@ public class TripsController : ControllerBase
     }
 
     [HttpPost("{tripId}/decline-invite")]
-    public async Task<IActionResult> DeclineTripInvite(string tripId, [FromServices] ICollaboratorDataService collaboratorDataService)
+    public async Task<IActionResult> DeclineTripInvite(
+        string tripId,
+        [FromServices] ICollaboratorDataService collaboratorDataService,
+        [FromServices] INotificationDataService notificationDataService)
     {
         try
         {
@@ -258,8 +289,32 @@ public class TripsController : ControllerBase
             if (!success)
                 return BadRequest(ApiResponse.Fail("Failed to decline trip invitation."));
 
-            await _activityLogDataService.LogActivityAsync(userId, tripId, "DECLINE_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} declined the trip invitation");
+            var userName = _currentUserContext.FullName ?? "User";
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "DECLINE_TRIP_INVITE", $"{userName} declined the trip invitation");
             _logger.LogInformation("User {UserId} declined invite to trip {TripId}", userId, tripId);
+
+            // Notify trip owner that user declined the trip request
+            try
+            {
+                var trip = await _tripDataService.GetTripDetailAsync(tripId, userId);
+                if (trip != null && !string.IsNullOrEmpty(trip.UserId) && trip.UserId != userId)
+                {
+                    await notificationDataService.CreateNotificationAsync(new Notification
+                    {
+                        NotificationId = Guid.NewGuid().ToString(),
+                        UserId = trip.UserId,
+                        TripId = tripId,
+                        TripName = trip.Name,
+                        Title = "Trip Request Declined",
+                        Message = $"{userName} declined the trip request to join \"{trip.Name}\"",
+                        Type = "TRIP_INVITE_DECLINED"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not notify owner of declined trip invite for trip {TripId}", tripId);
+            }
 
             return Ok(ApiResponse.Ok("Trip invitation declined."));
         }
