@@ -1,0 +1,11 @@
+Controller,TotalApis,PassedApis,FailedApis,AverageScore,Status
+ActivityLogs,1,1,0,94.5,Ready with Minor Improvements
+Auth,11,11,0,96.6,Production Ready
+Collaborators,4,4,0,94.5,Ready with Minor Improvements
+Expenses,6,6,0,95.0,Production Ready
+Friends,7,7,0,94.5,Ready with Minor Improvements
+Groups,4,4,0,94.5,Ready with Minor Improvements
+Notifications,4,4,0,94.5,Ready with Minor Improvements
+Persons,6,6,0,94.5,Ready with Minor Improvements
+Settlements,5,5,0,94.5,Ready with Minor Improvements
+Trips,6,6,0,95.2,Production Ready

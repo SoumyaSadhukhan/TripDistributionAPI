@@ -332,9 +332,10 @@ public class AuthController : ControllerBase
             }
 
             var configuredEnv = (_configuration["Environment"] ?? "DEBUG").Trim().ToUpperInvariant();
-            var isProductionMode = string.Equals(configuredEnv, "PRODUCTION", StringComparison.OrdinalIgnoreCase) ||
-                                   string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
-                                   string.Equals(dto.Environment, "prod", StringComparison.OrdinalIgnoreCase);
+            var isProductionMode = !string.Equals(dto.Environment, "debug", StringComparison.OrdinalIgnoreCase) &&
+                                   (string.Equals(configuredEnv, "PRODUCTION", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(dto.Environment, "prod", StringComparison.OrdinalIgnoreCase));
 
             if (targetUser == null)
             {

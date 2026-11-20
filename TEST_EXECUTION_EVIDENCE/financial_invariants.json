@@ -1,0 +1,22 @@
+[
+  {
+    "TripId": "13745148-98ed-47e5-91de-c7fa85f854b1",
+    "TotalExpenses": 1050.00,
+    "TotalSplits": 1050.00,
+    "SplitsMatchExpense": true,
+    "SumOfMemberBalances": 0.00,
+    "BalanceInvariantHolds": true,
+    "TotalSettlementsCompleted": 0.00,
+    "Details": "Expenses: 1050.00, Splits: 1050.00, Sum(Balances): 0.00, Settlements: 0.00"
+  },
+  {
+    "TripId": "13745148-98ed-47e5-91de-c7fa85f854b1",
+    "TotalExpenses": 1050.00,
+    "TotalSplits": 1050.00,
+    "SplitsMatchExpense": true,
+    "SumOfMemberBalances": 0.00,
+    "BalanceInvariantHolds": true,
+    "TotalSettlementsCompleted": 350.00,
+    "Details": "Expenses: 1050.00, Splits: 1050.00, Sum(Balances): 0.00, Settlements: 350.00"
+  }
+]

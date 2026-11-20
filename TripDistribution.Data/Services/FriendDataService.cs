@@ -340,6 +340,13 @@ public class FriendDataService : IFriendDataService
 
             var newStatus = status.Trim().ToUpperInvariant();
 
+            // Idempotent: If connection is already in requested state, return success immediately
+            if (currentStatus == newStatus)
+            {
+                _logger.LogInformation("Friend connection {ConnectionId} is already in state {Status} - idempotent success", connectionId, newStatus);
+                return true;
+            }
+
             // Validate state transitions: PENDING -> ACCEPTED, PENDING -> REJECTED, PENDING -> CANCELLED
             if (currentStatus == "PENDING")
             {
