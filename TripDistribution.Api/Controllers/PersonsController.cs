@@ -16,6 +16,9 @@ public class PersonsController : ControllerBase
 {
     private readonly IPersonDataService _personDataService;
     private readonly ITripDataService _tripDataService;
+    private readonly ICollaboratorDataService _collaboratorDataService;
+    private readonly INotificationDataService _notificationDataService;
+    private readonly IFriendDataService _friendDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly ILogger<PersonsController> _logger;
@@ -23,12 +26,18 @@ public class PersonsController : ControllerBase
     public PersonsController(
         IPersonDataService personDataService,
         ITripDataService tripDataService,
+        ICollaboratorDataService collaboratorDataService,
+        INotificationDataService notificationDataService,
+        IFriendDataService friendDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         ILogger<PersonsController> logger)
     {
         _personDataService = personDataService;
         _tripDataService = tripDataService;
+        _collaboratorDataService = collaboratorDataService;
+        _notificationDataService = notificationDataService;
+        _friendDataService = friendDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _logger = logger;
@@ -103,6 +112,50 @@ public class PersonsController : ControllerBase
             await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "ADD_PERSON", $"Added member '{dto.Name}'");
             _logger.LogInformation("Member {PersonId} '{Name}' added to trip {TripId}", person.PersonId, dto.Name, dto.TripId);
 
+            // If adding an existing user or friend, send trip invitation notification and create pending collaborator record
+            var targetUserId = dto.UserId;
+            if (string.IsNullOrEmpty(targetUserId) && !string.IsNullOrWhiteSpace(dto.PhoneNumber))
+            {
+                try
+                {
+                    var matched = (await _friendDataService.SearchUsersAsync(dto.PhoneNumber)).FirstOrDefault();
+                    if (matched != null && !string.IsNullOrEmpty(matched.UserId))
+                    {
+                        targetUserId = matched.UserId;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error resolving user for phone {Phone}", dto.PhoneNumber);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(targetUserId) && targetUserId != userId)
+            {
+                try
+                {
+                    await _collaboratorDataService.AddOrUpdatePendingCollaboratorAsync(dto.TripId, targetUserId, person.PersonId, dto.PhoneNumber);
+                    var trip = await _tripDataService.GetTripDetailAsync(dto.TripId, userId);
+                    var inviterName = _currentUserContext.FullName ?? "A trip member";
+
+                    await _notificationDataService.CreateNotificationAsync(new Notification
+                    {
+                        NotificationId = Guid.NewGuid().ToString(),
+                        UserId = targetUserId,
+                        TripId = dto.TripId,
+                        TripName = trip?.Name ?? "Trip",
+                        Title = "Trip Invitation",
+                        Message = $"{inviterName} invited you to join trip \"{trip?.Name ?? "a trip"}\"",
+                        Type = "TRIP_INVITE"
+                    });
+                    _logger.LogInformation("Trip invitation notification sent to {TargetUserId} for trip {TripId}", targetUserId, dto.TripId);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error sending trip invitation notification to user {TargetUserId}", targetUserId);
+                }
+            }
+
             return Ok(ApiResponse<Person>.Ok(person, "Member added successfully."));
         }
         catch (Exception ex)
@@ -135,6 +188,15 @@ public class PersonsController : ControllerBase
             var updated = await _personDataService.UpdatePersonAsync(id, dto);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Person not found."));
+
+            try
+            {
+                await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not recalculate balances after updating person {PersonId}", id);
+            }
 
             _logger.LogInformation("Member {PersonId} updated", id);
             return Ok(ApiResponse.Ok("Member updated successfully."));

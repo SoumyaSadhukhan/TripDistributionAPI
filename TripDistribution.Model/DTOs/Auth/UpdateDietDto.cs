@@ -21,4 +21,6 @@ public class UpdateProfileDto
     public string? FullName { get; set; }
     public string? AvatarColor { get; set; }
     public bool? IsBiometricEnabled { get; set; }
+    public DietType? DietType { get; set; }
+    public string? DietName { get; set; }
 }

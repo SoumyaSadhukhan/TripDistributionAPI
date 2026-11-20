@@ -148,12 +148,29 @@ public class PersonDataService : IPersonDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
-            var dietName = !string.IsNullOrWhiteSpace(dto.DietName) ? dto.DietName : dto.DietType.ToString();
+            var dietName = !string.IsNullOrWhiteSpace(dto.DietName)
+                ? dto.DietName
+                : (dto.DietType switch
+                {
+                    DietType.NonVegetarian => "Non-Vegetarian",
+                    DietType.NonVegAlcoholic => "Non-Veg + Alcohol",
+                    _ => "Vegetarian"
+                });
+
             const string sql = @"
                 UPDATE Persons 
-                SET name = @Name, group_id = @GroupId, phone_number = @PhoneNumber,
-                    diet_type = @DietType, diet_name = @DietName
-                WHERE person_id = @PersonId";
+                SET name = COALESCE(@Name, name),
+                    group_id = COALESCE(@GroupId, group_id),
+                    phone_number = COALESCE(@PhoneNumber, phone_number),
+                    diet_type = @DietType,
+                    diet_name = @DietName
+                WHERE person_id = @PersonId;
+
+                UPDATE u
+                SET u.diet_type = @DietType, u.diet_name = @DietName
+                FROM Users u
+                JOIN Persons p ON p.user_id = u.user_id
+                WHERE p.person_id = @PersonId;";
 
             var rows = await conn.ExecuteAsync(sql, new
             {
@@ -165,7 +182,7 @@ public class PersonDataService : IPersonDataService
                 DietName = dietName
             });
 
-            _logger.LogInformation("Member {PersonId} updated to '{Name}'", personId, dto.Name);
+            _logger.LogInformation("Member {PersonId} updated to '{Name}', diet {DietType}", personId, dto.Name, dto.DietType);
             return rows > 0;
         }
         catch (Exception ex)

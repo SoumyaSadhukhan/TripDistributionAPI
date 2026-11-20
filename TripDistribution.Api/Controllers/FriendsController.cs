@@ -100,13 +100,29 @@ public class FriendsController : ControllerBase
 
             if (!string.IsNullOrEmpty(result.ReceiverId) && result.ReceiverId != userId)
             {
-                var senderName = _currentUserContext.FullName ?? "A trip member";
+                var senderName = _currentUserContext.FullName;
+                if (string.IsNullOrWhiteSpace(senderName))
+                {
+                    try
+                    {
+                        var senderUsers = await _friendDataService.SearchUsersAsync(_currentUserContext.PhoneNumber ?? "");
+                        var matchedSender = senderUsers.FirstOrDefault();
+                        if (matchedSender != null && !string.IsNullOrWhiteSpace(matchedSender.FullName))
+                            senderName = matchedSender.FullName;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Could not resolve sender full name for friend request notification");
+                    }
+                }
+                senderName = !string.IsNullOrWhiteSpace(senderName) ? senderName.Trim() : "Someone";
+
                 await _notificationDataService.CreateNotificationAsync(new TripDistribution.Model.Entities.Notification
                 {
                     NotificationId = Guid.NewGuid().ToString(),
                     UserId = result.ReceiverId,
-                    Title = "Trip Friend Request",
-                    Message = $"{senderName} sent you a trip friend request.",
+                    Title = "Friend Request",
+                    Message = $"{senderName} sent you a friend request",
                     Type = "FRIEND_REQUEST"
                 });
             }

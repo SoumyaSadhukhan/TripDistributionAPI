@@ -78,9 +78,20 @@ public class TripDataService : ITripDataService
                 LEFT JOIN ExpSummary es ON t.trip_id = es.trip_id
                 LEFT JOIN MyPersonSummary mps ON t.trip_id = mps.trip_id AND mps.rn = 1
                 WHERE t.user_id = @UserId 
-                   OR p.user_id = @UserId 
-                   OR tc.user_id = @UserId
-                   OR (@Last10 <> '' AND (RIGHT(p.phone_number, 10) = @Last10 OR RIGHT(tc.phone_number, 10) = @Last10))
+                   OR (tc.user_id = @UserId AND tc.status = 'ACCEPTED')
+                   OR (p.user_id = @UserId AND NOT EXISTS (
+                           SELECT 1 FROM TripCollaborators tc_p 
+                           WHERE tc_p.trip_id = t.trip_id 
+                             AND (tc_p.user_id = @UserId OR (@Last10 <> '' AND RIGHT(tc_p.phone_number, 10) = @Last10))
+                             AND tc_p.status = 'PENDING'
+                       ))
+                   OR (@Last10 <> '' AND RIGHT(tc.phone_number, 10) = @Last10 AND tc.status = 'ACCEPTED')
+                   OR (@Last10 <> '' AND RIGHT(p.phone_number, 10) = @Last10 AND NOT EXISTS (
+                           SELECT 1 FROM TripCollaborators tc_p 
+                           WHERE tc_p.trip_id = t.trip_id 
+                             AND (tc_p.user_id = @UserId OR RIGHT(tc_p.phone_number, 10) = @Last10)
+                             AND tc_p.status = 'PENDING'
+                       ))
                 ORDER BY t.created_at DESC";
 
             var trips = await conn.QueryAsync<TripSummaryDto>(sql, new { UserId = userId, Last10 = last10 });
@@ -493,9 +504,20 @@ END CATCH;";
                 LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id
                 WHERE t.trip_id = @TripId 
                   AND (t.user_id = @UserId 
-                       OR p.user_id = @UserId 
-                       OR tc.user_id = @UserId 
-                       OR (@Last10 <> '' AND (RIGHT(p.phone_number, 10) = @Last10 OR RIGHT(tc.phone_number, 10) = @Last10)))";
+                       OR (tc.user_id = @UserId AND tc.status = 'ACCEPTED')
+                       OR (p.user_id = @UserId AND NOT EXISTS (
+                               SELECT 1 FROM TripCollaborators tc_p 
+                               WHERE tc_p.trip_id = t.trip_id 
+                                 AND (tc_p.user_id = @UserId OR (@Last10 <> '' AND RIGHT(tc_p.phone_number, 10) = @Last10))
+                                 AND tc_p.status = 'PENDING'
+                           ))
+                       OR (@Last10 <> '' AND RIGHT(tc.phone_number, 10) = @Last10 AND tc.status = 'ACCEPTED')
+                       OR (@Last10 <> '' AND RIGHT(p.phone_number, 10) = @Last10 AND NOT EXISTS (
+                               SELECT 1 FROM TripCollaborators tc_p 
+                               WHERE tc_p.trip_id = t.trip_id 
+                                 AND (tc_p.user_id = @UserId OR RIGHT(tc_p.phone_number, 10) = @Last10)
+                                 AND tc_p.status = 'PENDING'
+                           )))";
 
             var count = await conn.ExecuteScalarAsync<int>(sql, new { TripId = tripId, UserId = userId, Last10 = last10 });
             return count > 0;

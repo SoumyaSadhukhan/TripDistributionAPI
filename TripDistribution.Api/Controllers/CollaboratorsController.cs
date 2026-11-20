@@ -16,6 +16,7 @@ public class CollaboratorsController : ControllerBase
 {
     private readonly ICollaboratorDataService _collaboratorDataService;
     private readonly ITripDataService _tripDataService;
+    private readonly IFriendDataService _friendDataService;
     private readonly ICurrentUserContext _currentUserContext;
     private readonly IActivityLogDataService _activityLogDataService;
     private readonly INotificationDataService _notificationDataService;
@@ -24,6 +25,7 @@ public class CollaboratorsController : ControllerBase
     public CollaboratorsController(
         ICollaboratorDataService collaboratorDataService,
         ITripDataService tripDataService,
+        IFriendDataService friendDataService,
         ICurrentUserContext currentUserContext,
         IActivityLogDataService activityLogDataService,
         INotificationDataService notificationDataService,
@@ -31,6 +33,7 @@ public class CollaboratorsController : ControllerBase
     {
         _collaboratorDataService = collaboratorDataService;
         _tripDataService = tripDataService;
+        _friendDataService = friendDataService;
         _currentUserContext = currentUserContext;
         _activityLogDataService = activityLogDataService;
         _notificationDataService = notificationDataService;
@@ -76,28 +79,103 @@ public class CollaboratorsController : ControllerBase
             if (!canManage)
                 return StatusCode(403, ApiResponse.Fail("You do not have permission to invite collaborators to this trip."));
 
+            var targetUserId = dto.UserId;
+            if (string.IsNullOrEmpty(targetUserId) && !string.IsNullOrWhiteSpace(dto.PhoneNumber))
+            {
+                try
+                {
+                    var matched = (await _friendDataService.SearchUsersAsync(dto.PhoneNumber)).FirstOrDefault();
+                    if (matched != null && !string.IsNullOrEmpty(matched.UserId))
+                    {
+                        targetUserId = matched.UserId;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error resolving user for collaborator phone {Phone}", dto.PhoneNumber);
+                }
+            }
+            dto.UserId = targetUserId;
+
             var collab = await _collaboratorDataService.InviteCollaboratorAsync(dto);
             await _activityLogDataService.LogActivityAsync(userId, dto.TripId, "INVITE_COLLABORATOR", $"Invited collaborator {dto.PhoneNumber ?? dto.UserId}");
             _logger.LogInformation("Collaborator invited to trip {TripId}", dto.TripId);
 
-            if (!string.IsNullOrWhiteSpace(dto.UserId))
+            if (!string.IsNullOrWhiteSpace(targetUserId) && targetUserId != userId)
             {
+                var trip = await _tripDataService.GetTripDetailAsync(dto.TripId, userId);
+                var inviterName = _currentUserContext.FullName ?? "A trip member";
+
                 await _notificationDataService.CreateNotificationAsync(new Notification
                 {
-                    UserId = dto.UserId,
+                    NotificationId = Guid.NewGuid().ToString(),
+                    UserId = targetUserId,
                     TripId = dto.TripId,
-                    Title = "Trip Collaboration Invite",
-                    Message = "You were added as a collaborator to a trip.",
-                    Type = "COLLAB_INVITE"
+                    TripName = trip?.Name ?? "Trip",
+                    Title = "Trip Invitation",
+                    Message = $"{inviterName} invited you to join trip \"{trip?.Name ?? "a trip"}\"",
+                    Type = "TRIP_INVITE"
                 });
             }
 
-            return Ok(ApiResponse<CollaboratorDto>.Ok(collab, "Collaborator added successfully."));
+            return Ok(ApiResponse<CollaboratorDto>.Ok(collab, "Collaborator invited successfully."));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Exception in InviteCollaborator for trip: {TripId}", dto.TripId);
             return StatusCode(500, ApiResponse.Fail("Failed to invite collaborator."));
+        }
+    }
+
+    [HttpPost("trip/{tripId}/accept")]
+    public async Task<IActionResult> AcceptTripInvite(string tripId)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            var phone = _currentUserContext.PhoneNumber;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var success = await _collaboratorDataService.AcceptTripInviteAsync(tripId, userId, phone);
+            if (!success)
+                return BadRequest(ApiResponse.Fail("Failed to accept trip invitation."));
+
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "ACCEPT_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} joined the trip");
+            _logger.LogInformation("User {UserId} accepted invite to trip {TripId}", userId, tripId);
+
+            return Ok(ApiResponse.Ok("Joined trip successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in AcceptTripInvite for trip: {TripId}", tripId);
+            return StatusCode(500, ApiResponse.Fail("Failed to accept trip invite."));
+        }
+    }
+
+    [HttpPost("trip/{tripId}/decline")]
+    public async Task<IActionResult> DeclineTripInvite(string tripId)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            var phone = _currentUserContext.PhoneNumber;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var success = await _collaboratorDataService.DeclineTripInviteAsync(tripId, userId, phone);
+            if (!success)
+                return BadRequest(ApiResponse.Fail("Failed to decline trip invitation."));
+
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "DECLINE_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} declined the trip invitation");
+            _logger.LogInformation("User {UserId} declined invite to trip {TripId}", userId, tripId);
+
+            return Ok(ApiResponse.Ok("Trip invitation declined."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in DeclineTripInvite for trip: {TripId}", tripId);
+            return StatusCode(500, ApiResponse.Fail("Failed to decline trip invite."));
         }
     }
 

@@ -54,14 +54,26 @@ public class UserDataService : IUserDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
-            var name = !string.IsNullOrWhiteSpace(dietName) ? dietName : dietType.ToString();
+            var name = !string.IsNullOrWhiteSpace(dietName)
+                ? dietName
+                : (dietType switch
+                {
+                    DietType.NonVegetarian => "Non-Vegetarian",
+                    DietType.NonVegAlcoholic => "Non-Veg + Alcohol",
+                    _ => "Vegetarian"
+                });
+
             const string sql = @"
                 UPDATE Users 
                 SET diet_type = @DietType, diet_name = @DietName, updated_at = GETDATE()
-                WHERE user_id = @UserId AND is_active = 1";
+                WHERE user_id = @UserId AND is_active = 1;
+
+                UPDATE Persons
+                SET diet_type = @DietType, diet_name = @DietName
+                WHERE user_id = @UserId;";
 
             var rows = await conn.ExecuteAsync(sql, new { UserId = userId, DietType = (int)dietType, DietName = name });
-            _logger.LogInformation("Diet preference updated for user {UserId} to {DietType}", userId, dietType);
+            _logger.LogInformation("Diet preference updated for user {UserId} to {DietType} ({DietName})", userId, dietType, name);
             return rows > 0;
         }
         catch (Exception ex)
@@ -76,20 +88,42 @@ public class UserDataService : IUserDataService
         try
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
+            string? dietName = dto.DietName;
+            if (dto.DietType.HasValue && string.IsNullOrWhiteSpace(dietName))
+            {
+                dietName = dto.DietType.Value switch
+                {
+                    DietType.NonVegetarian => "Non-Vegetarian",
+                    DietType.NonVegAlcoholic => "Non-Veg + Alcohol",
+                    _ => "Vegetarian"
+                };
+            }
+
             const string sql = @"
                 UPDATE Users 
                 SET full_name = COALESCE(@FullName, full_name),
                     avatar_color = COALESCE(@AvatarColor, avatar_color),
                     is_biometric_enabled = COALESCE(@IsBiometricEnabled, is_biometric_enabled),
+                    diet_type = COALESCE(@DietType, diet_type),
+                    diet_name = COALESCE(@DietName, diet_name),
                     updated_at = GETDATE()
-                WHERE user_id = @UserId AND is_active = 1";
+                WHERE user_id = @UserId AND is_active = 1;
+
+                IF @DietType IS NOT NULL
+                BEGIN
+                    UPDATE Persons
+                    SET diet_type = @DietType, diet_name = COALESCE(@DietName, diet_name)
+                    WHERE user_id = @UserId;
+                END";
 
             var rows = await conn.ExecuteAsync(sql, new
             {
                 UserId = userId,
                 dto.FullName,
                 dto.AvatarColor,
-                dto.IsBiometricEnabled
+                dto.IsBiometricEnabled,
+                DietType = dto.DietType.HasValue ? (int?)dto.DietType.Value : null,
+                DietName = dietName
             });
             _logger.LogInformation("Profile updated for user: {UserId}", userId);
             return rows > 0;

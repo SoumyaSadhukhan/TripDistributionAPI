@@ -217,4 +217,56 @@ public class TripsController : ControllerBase
             return StatusCode(500, ApiResponse.Fail("Failed to delete trip."));
         }
     }
+
+    [HttpPost("{tripId}/accept-invite")]
+    public async Task<IActionResult> AcceptTripInvite(string tripId, [FromServices] ICollaboratorDataService collaboratorDataService)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            var phone = _currentUserContext.PhoneNumber;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var success = await collaboratorDataService.AcceptTripInviteAsync(tripId, userId, phone);
+            if (!success)
+                return BadRequest(ApiResponse.Fail("Failed to accept trip invitation."));
+
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "ACCEPT_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} joined the trip");
+            _logger.LogInformation("User {UserId} accepted invite to trip {TripId}", userId, tripId);
+
+            return Ok(ApiResponse.Ok("Joined trip successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in AcceptTripInvite for trip: {TripId}", tripId);
+            return StatusCode(500, ApiResponse.Fail("Failed to accept trip invite."));
+        }
+    }
+
+    [HttpPost("{tripId}/decline-invite")]
+    public async Task<IActionResult> DeclineTripInvite(string tripId, [FromServices] ICollaboratorDataService collaboratorDataService)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            var phone = _currentUserContext.PhoneNumber;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var success = await collaboratorDataService.DeclineTripInviteAsync(tripId, userId, phone);
+            if (!success)
+                return BadRequest(ApiResponse.Fail("Failed to decline trip invitation."));
+
+            await _activityLogDataService.LogActivityAsync(userId, tripId, "DECLINE_TRIP_INVITE", $"{_currentUserContext.FullName ?? "User"} declined the trip invitation");
+            _logger.LogInformation("User {UserId} declined invite to trip {TripId}", userId, tripId);
+
+            return Ok(ApiResponse.Ok("Trip invitation declined."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in DeclineTripInvite for trip: {TripId}", tripId);
+            return StatusCode(500, ApiResponse.Fail("Failed to decline trip invite."));
+        }
+    }
 }
