@@ -14,6 +14,7 @@ public interface IPersonDataService
     Task<Person> CreatePersonAsync(CreatePersonDto dto);
     Task<bool> UpdatePersonAsync(string personId, UpdatePersonDto dto);
     Task<bool> DeletePersonAsync(string personId);
+    Task<bool> RestorePersonAsync(string personId);
     Task RecalculateTripBalancesAsync(string tripId);
 }
 
@@ -38,9 +39,11 @@ public class PersonDataService : IPersonDataService
                        user_id AS UserId, phone_number AS PhoneNumber, name AS Name,
                        diet_type AS DietType, diet_name AS DietName,
                        paid_amount AS PaidAmount, owed_amount AS OwedAmount, balance AS Balance,
+                       is_deleted AS IsDeleted, deleted_at AS DeletedAt,
                        created_at AS CreatedAt
                 FROM Persons 
                 WHERE trip_id = @TripId 
+                  AND (ISNULL(is_deleted, 0) = 0 OR balance <> 0.00 OR paid_amount <> 0.00 OR owed_amount <> 0.00)
                 ORDER BY created_at ASC";
 
             return await conn.QueryAsync<PersonDto>(sql, new { TripId = tripId });
@@ -64,7 +67,7 @@ public class PersonDataService : IPersonDataService
                        paid_amount AS PaidAmount, owed_amount AS OwedAmount, balance AS Balance,
                        created_at AS CreatedAt
                 FROM Persons 
-                WHERE person_id = @PersonId";
+                WHERE person_id = @PersonId AND ISNULL(is_deleted, 0) = 0";
 
             return await conn.QuerySingleOrDefaultAsync<PersonDto>(sql, new { PersonId = personId });
         }
@@ -200,28 +203,48 @@ public class PersonDataService : IPersonDataService
             var person = await GetPersonByIdAsync(personId);
             if (person == null) return false;
 
-            using var trans = conn.BeginTransaction();
-            try
-            {
-                await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
-                await conn.ExecuteAsync("DELETE FROM SettlementTransactions WHERE from_person_id = @PersonId OR to_person_id = @PersonId", new { PersonId = personId }, transaction: trans);
-                await conn.ExecuteAsync("DELETE FROM TripCollaborators WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
-                var rows = await conn.ExecuteAsync("DELETE FROM Persons WHERE person_id = @PersonId", new { PersonId = personId }, transaction: trans);
-                trans.Commit();
+            // Soft delete person: preserve entity for historical financial audits
+            const string sql = @"
+                UPDATE Persons 
+                SET is_deleted = 1, deleted_at = GETUTCDATE() 
+                WHERE person_id = @PersonId;";
 
-                _logger.LogInformation("Person {PersonId} deleted, recalculating balances for trip {TripId}", personId, person.TripId);
-                await RecalculateTripBalancesAsync(person.TripId);
-                return rows > 0;
-            }
-            catch
+            var rows = await conn.ExecuteAsync(sql, new { PersonId = personId });
+            if (rows > 0)
             {
-                trans.Rollback();
-                throw;
+                _logger.LogInformation("Person {PersonId} soft-deleted, recalculating balances for trip {TripId}", personId, person.TripId);
+                await RecalculateTripBalancesAsync(person.TripId);
             }
+            return rows > 0;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error deleting person: {PersonId}", personId);
+            _logger.LogError(ex, "Error soft-deleting person: {PersonId}", personId);
+            throw;
+        }
+    }
+
+    public async Task<bool> RestorePersonAsync(string personId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            var person = await conn.QuerySingleOrDefaultAsync<PersonDto>(
+                "SELECT person_id AS PersonId, trip_id AS TripId FROM Persons WHERE person_id = @PersonId", new { PersonId = personId });
+            if (person == null) return false;
+
+            const string sql = "UPDATE Persons SET is_deleted = 0, deleted_at = NULL WHERE person_id = @PersonId;";
+            var rows = await conn.ExecuteAsync(sql, new { PersonId = personId });
+            if (rows > 0)
+            {
+                _logger.LogInformation("Person {PersonId} restored in trip {TripId}", personId, person.TripId);
+                await RecalculateTripBalancesAsync(person.TripId);
+            }
+            return rows > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error restoring person: {PersonId}", personId);
             throw;
         }
     }
@@ -237,27 +260,28 @@ public class PersonDataService : IPersonDataService
                 SET paid_amount = 0.00, owed_amount = 0.00, balance = 0.00
                 WHERE trip_id = @TripId;
 
-                -- 2. Update paid_amount from Expenses
+                -- 2. Update paid_amount from active Expenses only
                 UPDATE p
                 SET p.paid_amount = ISNULL(exp.TotalPaid, 0.00)
                 FROM Persons p
                 INNER JOIN (
                     SELECT paid_by_person_id, SUM(amount) AS TotalPaid
                     FROM Expenses
-                    WHERE trip_id = @TripId
+                    WHERE trip_id = @TripId AND ISNULL(is_deleted, 0) = 0
                     GROUP BY paid_by_person_id
                 ) exp ON p.person_id = exp.paid_by_person_id
                 WHERE p.trip_id = @TripId;
 
-                -- 3. Update owed_amount from ExpenseSplits
+                -- 3. Update owed_amount from active ExpenseSplits only (linked to active non-deleted expenses)
                 UPDATE p
                 SET p.owed_amount = ISNULL(sp.TotalOwed, 0.00)
                 FROM Persons p
                 INNER JOIN (
-                    SELECT person_id, SUM(amount) AS TotalOwed
-                    FROM ExpenseSplits
-                    WHERE trip_id = @TripId
-                    GROUP BY person_id
+                    SELECT es.person_id, SUM(es.amount) AS TotalOwed
+                    FROM ExpenseSplits es
+                    INNER JOIN Expenses e ON es.expense_id = e.expense_id
+                    WHERE es.trip_id = @TripId AND ISNULL(e.is_deleted, 0) = 0
+                    GROUP BY es.person_id
                 ) sp ON p.person_id = sp.person_id
                 WHERE p.trip_id = @TripId;
 

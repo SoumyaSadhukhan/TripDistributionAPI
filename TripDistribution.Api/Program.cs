@@ -39,6 +39,32 @@ Log.Logger = new LoggerConfiguration()
 
 builder.Host.UseSerilog();
 
+// DATABASE CONNECTION SAFETY GUARD
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? "";
+var appEnv = builder.Environment.EnvironmentName;
+
+if (string.Equals(appEnv, "Testing", StringComparison.OrdinalIgnoreCase))
+{
+    if (!connectionString.Contains("SPLIT_BILL_DB_TEST", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("[FATAL STARTUP BLOCKED] ASPNETCORE_ENVIRONMENT is 'Testing', but DefaultConnection does NOT connect to 'SPLIT_BILL_DB_TEST'! Refusing to start to protect production data.");
+        Console.ResetColor();
+        throw new InvalidOperationException("CRITICAL SAFETY GUARD: Testing environment must connect to SPLIT_BILL_DB_TEST only. Current connection: " + connectionString);
+    }
+    Console.WriteLine("[DATABASE SAFETY GUARD] Confirmed: Testing environment is connected strictly to SPLIT_BILL_DB_TEST.");
+}
+else if (string.Equals(appEnv, "Production", StringComparison.OrdinalIgnoreCase))
+{
+    if (connectionString.Contains("SPLIT_BILL_DB_TEST", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine("[FATAL STARTUP BLOCKED] ASPNETCORE_ENVIRONMENT is 'Production', but DefaultConnection points to test database 'SPLIT_BILL_DB_TEST'!");
+        Console.ResetColor();
+        throw new InvalidOperationException("CRITICAL SAFETY GUARD: Production environment cannot connect to SPLIT_BILL_DB_TEST.");
+    }
+}
+
 // 1. Controllers & JSON Serialization
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
@@ -319,7 +345,7 @@ app.Use(async (context, next) =>
 // Middleware Pipeline
 app.UseMiddleware<GlobalExceptionMiddleware>();
 
-if (!app.Environment.IsDevelopment())
+if (!app.Environment.IsDevelopment() && !app.Environment.IsEnvironment("Testing"))
 {
     app.UseHttpsRedirection();
     app.UseHsts();

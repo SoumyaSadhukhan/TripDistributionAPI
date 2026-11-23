@@ -195,6 +195,14 @@ public class ExpensesController : ControllerBase
             if (!await _tripDataService.HasUserTripAccessAsync(existing.TripId, userId, _currentUserContext.PhoneNumber))
                 return StatusCode(403, ApiResponse.Fail("You do not have permission to modify this expense."));
 
+            if (!await CanUserModifyExpenseAsync(existing, userId))
+            {
+                _logger.LogWarning("BOLA blocked: User {UserId} attempted unauthorized modification of Expense {ExpenseId} paid by {PayerId}", 
+                    userId, id, existing.PaidByPersonId);
+                return StatusCode(StatusCodes.Status403Forbidden, 
+                    ApiResponse.Fail("You do not have permission to modify this expense. Only the payer, trip creator, or a trip administrator may modify expenses."));
+            }
+
             var updated = await _expenseDataService.UpdateExpenseAsync(id, dto);
             if (!updated)
                 return NotFound(ApiResponse.Fail("Expense could not be updated."));
@@ -228,6 +236,14 @@ public class ExpensesController : ControllerBase
             if (!await _tripDataService.HasUserTripAccessAsync(existing.TripId, userId, _currentUserContext.PhoneNumber))
                 return StatusCode(403, ApiResponse.Fail("You do not have permission to delete this expense."));
 
+            if (!await CanUserModifyExpenseAsync(existing, userId))
+            {
+                _logger.LogWarning("BOLA blocked: User {UserId} attempted unauthorized deletion of Expense {ExpenseId} paid by {PayerId}", 
+                    userId, id, existing.PaidByPersonId);
+                return StatusCode(StatusCodes.Status403Forbidden, 
+                    ApiResponse.Fail("You do not have permission to delete this expense. Only the payer, trip creator, or a trip administrator may delete expenses."));
+            }
+
             var deleted = await _expenseDataService.DeleteExpenseAsync(id);
             if (!deleted)
                 return NotFound(ApiResponse.Fail("Expense could not be deleted."));
@@ -241,6 +257,29 @@ public class ExpensesController : ControllerBase
         {
             _logger.LogError(ex, "Exception in DeleteExpense: {ExpenseId}", id);
             return StatusCode(500, ApiResponse.Fail("Failed to delete expense."));
+        }
+    }
+
+    [HttpPost("restore/{id}")]
+    public async Task<IActionResult> RestoreExpense(string id)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var restored = await _expenseDataService.RestoreExpenseAsync(id);
+            if (!restored)
+                return NotFound(ApiResponse.Fail("Expense not found or could not be restored."));
+
+            _logger.LogInformation("Expense {ExpenseId} restored", id);
+            return Ok(ApiResponse.Ok("Expense restored successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in RestoreExpense: {ExpenseId}", id);
+            return StatusCode(500, ApiResponse.Fail("Failed to restore expense."));
         }
     }
 
@@ -264,6 +303,34 @@ public class ExpensesController : ControllerBase
             _logger.LogError(ex, "Exception in CalculateDietarySplit for trip: {TripId}", tripId);
             return StatusCode(500, ApiResponse.Fail("Failed to calculate dietary split."));
         }
+    }
+
+    private async Task<bool> CanUserModifyExpenseAsync(ExpenseDetailDto expense, string userId)
+    {
+        // 1. Primary check: Is user the authenticated payer?
+        var payerPerson = await _personDataService.GetPersonByIdAsync(expense.PaidByPersonId);
+        if (payerPerson != null)
+        {
+            // If payer has a linked user_id, STRICTLY compare userId. NEVER fall back to phone!
+            if (!string.IsNullOrEmpty(payerPerson.UserId))
+            {
+                if (payerPerson.UserId == userId)
+                    return true;
+            }
+            else
+            {
+                // Collaborator phone fallback is ONLY used when UserId is NULL or empty
+                if (!string.IsNullOrEmpty(payerPerson.PhoneNumber) && 
+                    !string.IsNullOrEmpty(_currentUserContext.PhoneNumber) && 
+                    payerPerson.PhoneNumber == _currentUserContext.PhoneNumber)
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 2. Exception: Is user the trip creator, owner, or admin?
+        return await _tripDataService.CanUserManageTripAsync(expense.TripId, userId);
     }
 
     private static bool HasMaxTwoDecimals(decimal value)

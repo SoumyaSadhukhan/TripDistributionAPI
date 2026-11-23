@@ -173,7 +173,7 @@ public class CollaboratorDataService : ICollaboratorDataService
 
             const string sql = @"
                 UPDATE TripCollaborators
-                SET status = 'ACCEPTED', joined_at = GETDATE()
+                SET status = 'ACCEPTED', user_id = @UserId, joined_at = GETDATE()
                 WHERE trip_id = @TripId 
                   AND (user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10));
 

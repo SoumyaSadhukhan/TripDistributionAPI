@@ -219,6 +219,34 @@ public class TripsController : ControllerBase
         }
     }
 
+    [HttpPost("restore/{id}")]
+    public async Task<IActionResult> RestoreTrip(string id)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            if (!await _tripDataService.IsTripOwnerAsync(id, userId))
+                return StatusCode(403, ApiResponse.Fail("Only the trip owner can restore this trip."));
+
+            var restored = await _tripDataService.RestoreTripAsync(id);
+            if (!restored)
+                return NotFound(ApiResponse.Fail("Trip not found or could not be restored."));
+
+            await _activityLogDataService.LogActivityAsync(userId, id, "RESTORE_TRIP", $"Restored trip {id}");
+            _logger.LogInformation("Trip {TripId} restored", id);
+
+            return Ok(ApiResponse.Ok("Trip and associated records restored successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in RestoreTrip: {TripId}", id);
+            return StatusCode(500, ApiResponse.Fail("Failed to restore trip."));
+        }
+    }
+
     [HttpPost("{tripId}/accept-invite")]
     public async Task<IActionResult> AcceptTripInvite(
         string tripId,

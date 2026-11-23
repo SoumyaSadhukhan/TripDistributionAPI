@@ -35,5 +35,7 @@ public class PersonDto
     public decimal PaidAmount { get; set; }
     public decimal OwedAmount { get; set; }
     public decimal Balance { get; set; }
+    public bool IsDeleted { get; set; } = false;
+    public DateTime? DeletedAt { get; set; }
     public DateTime CreatedAt { get; set; }
 }

@@ -18,6 +18,7 @@ public interface ITripDataService
     Task<Trip> CreateTripAsync(string userId, string? userPhone, string? userName, DietType dietType, string? dietName, CreateTripDto dto);
     Task<bool> UpdateTripAsync(string tripId, UpdateTripDto dto);
     Task<bool> DeleteTripAsync(string tripId);
+    Task<bool> RestoreTripAsync(string tripId);
     Task<bool> SyncTripsAsync(string userId, string jsonTrips);
     Task<bool> HasUserTripAccessAsync(string tripId, string userId, string? phone = null);
     Task<bool> CanUserManageTripAsync(string tripId, string userId);
@@ -47,18 +48,21 @@ public class TripDataService : ITripDataService
                 WITH ExpSummary AS (
                     SELECT trip_id, SUM(amount) AS TotalExpenses
                     FROM Expenses
+                    WHERE ISNULL(is_deleted, 0) = 0
                     GROUP BY trip_id
                 ),
                 MemberSummary AS (
                     SELECT trip_id, COUNT(DISTINCT person_id) AS MemberCount
                     FROM Persons
+                    WHERE ISNULL(is_deleted, 0) = 0
                     GROUP BY trip_id
                 ),
                 MyPersonSummary AS (
                     SELECT trip_id, paid_amount, owed_amount, balance,
                            ROW_NUMBER() OVER (PARTITION BY trip_id ORDER BY created_at ASC) as rn
                     FROM Persons
-                    WHERE user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10)
+                    WHERE (user_id = @UserId OR (@Last10 <> '' AND RIGHT(phone_number, 10) = @Last10))
+                      AND ISNULL(is_deleted, 0) = 0
                 )
                 SELECT DISTINCT 
                        t.trip_id AS TripId, t.user_id AS UserId, t.name AS Name, 
@@ -72,12 +76,13 @@ public class TripDataService : ITripDataService
                        ISNULL(mps.owed_amount, 0.00) AS MyOwedAmount,
                        ISNULL(mps.balance, 0.00) AS MyBalance
                 FROM Trips t
-                LEFT JOIN Persons p ON t.trip_id = p.trip_id
+                LEFT JOIN Persons p ON t.trip_id = p.trip_id AND ISNULL(p.is_deleted, 0) = 0
                 LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id AND (tc.user_id = @UserId OR (@Last10 <> '' AND RIGHT(tc.phone_number, 10) = @Last10))
                 LEFT JOIN MemberSummary ms ON t.trip_id = ms.trip_id
                 LEFT JOIN ExpSummary es ON t.trip_id = es.trip_id
                 LEFT JOIN MyPersonSummary mps ON t.trip_id = mps.trip_id AND mps.rn = 1
-                WHERE t.user_id = @UserId 
+                WHERE ISNULL(t.is_deleted, 0) = 0 AND (
+                      t.user_id = @UserId 
                    OR (tc.user_id = @UserId AND tc.status = 'ACCEPTED')
                    OR (p.user_id = @UserId AND NOT EXISTS (
                            SELECT 1 FROM TripCollaborators tc_p 
@@ -92,6 +97,7 @@ public class TripDataService : ITripDataService
                              AND (tc_p.user_id = @UserId OR RIGHT(tc_p.phone_number, 10) = @Last10)
                              AND tc_p.status = 'PENDING'
                        ))
+                )
                 ORDER BY t.created_at DESC";
 
             var trips = await conn.QueryAsync<TripSummaryDto>(sql, new { UserId = userId, Last10 = last10 });
@@ -114,7 +120,7 @@ public class TripDataService : ITripDataService
                        description AS Description, currency_code AS CurrencyCode,
                        created_at AS CreatedAt, updated_at AS UpdatedAt
                 FROM Trips 
-                WHERE trip_id = @TripId";
+                WHERE trip_id = @TripId AND ISNULL(is_deleted, 0) = 0";
 
             var trip = await conn.QuerySingleOrDefaultAsync<TripDetailDto>(tripSql, new { TripId = tripId });
             if (trip == null) return null;
@@ -131,8 +137,12 @@ public class TripDataService : ITripDataService
                        user_id AS UserId, phone_number AS PhoneNumber, name AS Name,
                        diet_type AS DietType, diet_name AS DietName,
                        paid_amount AS PaidAmount, owed_amount AS OwedAmount, balance AS Balance,
+                       is_deleted AS IsDeleted, deleted_at AS DeletedAt,
                        created_at AS CreatedAt
-                FROM Persons WHERE trip_id = @TripId ORDER BY created_at ASC";
+                FROM Persons 
+                WHERE trip_id = @TripId 
+                  AND (ISNULL(is_deleted, 0) = 0 OR balance <> 0.00 OR paid_amount <> 0.00 OR owed_amount <> 0.00)
+                ORDER BY created_at ASC";
             trip.Persons = (await conn.QueryAsync<PersonDto>(personsSql, new { TripId = tripId })).ToList();
 
             // 3. Expenses with Splits
@@ -144,7 +154,7 @@ public class TripDataService : ITripDataService
                        e.created_at AS CreatedAt
                 FROM Expenses e
                 LEFT JOIN Persons p ON e.paid_by_person_id = p.person_id
-                WHERE e.trip_id = @TripId
+                WHERE e.trip_id = @TripId AND ISNULL(e.is_deleted, 0) = 0
                 ORDER BY e.expense_date DESC";
             var expenses = (await conn.QueryAsync<ExpenseDetailDto>(expensesSql, new { TripId = tripId })).ToList();
 
@@ -469,22 +479,41 @@ END CATCH;";
         {
             using var conn = await _connectionFactory.CreateConnectionAsync();
             
-            await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM Expenses WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM SettlementTransactions WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM TripCollaborators WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM Persons WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM Groups WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM ActivityLogs WHERE trip_id = @TripId", new { TripId = tripId });
-            await conn.ExecuteAsync("DELETE FROM Notifications WHERE trip_id = @TripId", new { TripId = tripId });
-            var rows = await conn.ExecuteAsync("DELETE FROM Trips WHERE trip_id = @TripId", new { TripId = tripId });
+            // Soft delete trip and child entities (Expenses, Persons) while keeping settlements & logs for audit
+            const string sql = @"
+                UPDATE Expenses SET is_deleted = 1, deleted_at = GETUTCDATE() WHERE trip_id = @TripId;
+                UPDATE Persons SET is_deleted = 1, deleted_at = GETUTCDATE() WHERE trip_id = @TripId;
+                UPDATE Trips SET is_deleted = 1, deleted_at = GETUTCDATE() WHERE trip_id = @TripId;
+            ";
             
-            _logger.LogInformation("Trip {TripId} and all child entities deleted", tripId);
+            var rows = await conn.ExecuteAsync(sql, new { TripId = tripId });
+            _logger.LogInformation("Trip {TripId} and child entities soft-deleted", tripId);
             return rows > 0;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error deleting trip: {TripId}", tripId);
+            _logger.LogError(ex, "Error soft-deleting trip: {TripId}", tripId);
+            throw;
+        }
+    }
+
+    public async Task<bool> RestoreTripAsync(string tripId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            const string sql = @"
+                UPDATE Trips SET is_deleted = 0, deleted_at = NULL WHERE trip_id = @TripId;
+                UPDATE Expenses SET is_deleted = 0, deleted_at = NULL WHERE trip_id = @TripId;
+                UPDATE Persons SET is_deleted = 0, deleted_at = NULL WHERE trip_id = @TripId;
+            ";
+            var rows = await conn.ExecuteAsync(sql, new { TripId = tripId });
+            _logger.LogInformation("Trip {TripId} and child entities restored", tripId);
+            return rows > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error restoring trip: {TripId}", tripId);
             throw;
         }
     }
@@ -537,7 +566,7 @@ END CATCH;";
             const string sql = @"
                 SELECT COUNT(1)
                 FROM Trips t
-                LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id AND tc.user_id = @UserId
+                LEFT JOIN TripCollaborators tc ON t.trip_id = tc.trip_id AND tc.user_id = @UserId AND tc.status = 'ACCEPTED'
                 WHERE t.trip_id = @TripId 
                   AND (t.user_id = @UserId OR tc.role IN ('OWNER', 'ADMIN', 'EDITOR'))";
 

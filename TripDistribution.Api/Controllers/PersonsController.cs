@@ -239,6 +239,29 @@ public class PersonsController : ControllerBase
         }
     }
 
+    [HttpPost("restore/{id}")]
+    public async Task<IActionResult> RestorePerson(string id)
+    {
+        try
+        {
+            var userId = _currentUserContext.UserId;
+            if (string.IsNullOrEmpty(userId))
+                return Unauthorized(ApiResponse.Fail("Unauthorized user."));
+
+            var restored = await _personDataService.RestorePersonAsync(id);
+            if (!restored)
+                return NotFound(ApiResponse.Fail("Person not found or could not be restored."));
+
+            _logger.LogInformation("Member {PersonId} restored", id);
+            return Ok(ApiResponse.Ok("Member restored successfully."));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Exception in RestorePerson: {PersonId}", id);
+            return StatusCode(500, ApiResponse.Fail("Failed to restore member."));
+        }
+    }
+
     [HttpPost("recalculate/{tripId}")]
     public async Task<IActionResult> RecalculateTrip(string tripId)
     {

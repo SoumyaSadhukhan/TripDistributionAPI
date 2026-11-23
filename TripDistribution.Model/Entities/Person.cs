@@ -15,5 +15,7 @@ public class Person
     public decimal PaidAmount { get; set; } = 0.00m;
     public decimal OwedAmount { get; set; } = 0.00m;
     public decimal Balance { get; set; } = 0.00m;
+    public bool IsDeleted { get; set; } = false;
+    public DateTime? DeletedAt { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

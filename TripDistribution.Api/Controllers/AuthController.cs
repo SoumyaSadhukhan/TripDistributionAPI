@@ -107,7 +107,8 @@ public class AuthController : ControllerBase
                 var isDev = _environment.IsDevelopment();
                 var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
                 otpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
-                await _authDataService.SaveOtpAsync(user.UserId, user.Email, user.PhoneNumber, otpCode, "REGISTER");
+                var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
+                await _authDataService.SaveOtpAsync(user.UserId, user.Email, user.PhoneNumber, otpCode, "REGISTER", 10, clientIp);
                 if (!bypassInDebug)
                 {
                     emailSent = await _emailService.SendOtpEmailAsync(user.Email, otpCode, "REGISTER", user.FullName);
@@ -313,6 +314,7 @@ public class AuthController : ControllerBase
     {
         try
         {
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
             var authenticatedUserId = _currentUserContext.UserId;
 
             // Strict BOLA Guard: Authenticated user cannot trigger OTP for another account
@@ -331,11 +333,15 @@ public class AuthController : ControllerBase
                 targetUser = await _authDataService.FindUserAsync(targetUserId, dto.Username, dto.Email, dto.Phone);
             }
 
-            var configuredEnv = (_configuration["Environment"] ?? "DEBUG").Trim().ToUpperInvariant();
-            var isProductionMode = !string.Equals(dto.Environment, "debug", StringComparison.OrdinalIgnoreCase) &&
-                                   (string.Equals(configuredEnv, "PRODUCTION", StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(dto.Environment, "production", StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(dto.Environment, "prod", StringComparison.OrdinalIgnoreCase));
+            // Production Safety Gate: In ANY production environment, OTP code is NEVER exposed under any circumstances.
+            // Client input cannot bypass this server-side security rule.
+            var isServerProduction = _environment.IsProduction() 
+                                  || string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Production", StringComparison.OrdinalIgnoreCase)
+                                  || string.Equals(_configuration["Environment"], "PRODUCTION", StringComparison.OrdinalIgnoreCase)
+                                  || _configuration.GetValue<bool>("ProductionMode", false);
+
+            var isDev = (_environment.IsDevelopment() || _environment.IsEnvironment("Testing")) && !isServerProduction;
+            var isProductionMode = isServerProduction;
 
             if (targetUser == null)
             {
@@ -359,11 +365,10 @@ public class AuthController : ControllerBase
                         return BadRequest(ApiResponse.Fail("Email address is required to receive registration verification OTP."));
                     }
 
-                    var isDev = _environment.IsDevelopment();
                     var bypassInDebug = !isProductionMode && isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
                     var regOtpCode = bypassInDebug ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
 
-                    var regSaved = await _authDataService.SaveOtpAsync(null, regEmail, regPhone, regOtpCode, "REGISTER");
+                    var regSaved = await _authDataService.SaveOtpAsync(null, regEmail, regPhone, regOtpCode, "REGISTER", 10, clientIp);
                     if (!regSaved)
                         return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
 
@@ -406,11 +411,11 @@ public class AuthController : ControllerBase
             string? destPhone = !string.IsNullOrWhiteSpace(dto.Phone) ? dto.Phone : targetUser.PhoneNumber;
             string displayName = targetUser.FullName ?? targetUser.Username ?? "Member";
 
-            var isDevTarget = _environment.IsDevelopment();
+            var isDevTarget = (_environment.IsDevelopment() || _environment.IsEnvironment("Testing")) && !isProductionMode;
             var bypassInDebugTarget = !isProductionMode && isDevTarget && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
             var otpCode = bypassInDebugTarget ? "123456" : RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
 
-            var saved = await _authDataService.SaveOtpAsync(targetUser.UserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper());
+            var saved = await _authDataService.SaveOtpAsync(targetUser.UserId, destEmail, destPhone, otpCode, dto.Purpose.ToUpper(), 10, clientIp);
             if (!saved)
                 return StatusCode(500, ApiResponse.Fail("Failed to generate OTP."));
 
@@ -442,6 +447,11 @@ public class AuthController : ControllerBase
             };
 
             return Ok(ApiResponse<object>.Ok(responseData));
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning("Rate limit triggered in SendOtp: {Message}", ex.Message);
+            return StatusCode(StatusCodes.Status429TooManyRequests, ApiResponse.Fail(ex.Message));
         }
         catch (Exception ex)
         {
@@ -475,28 +485,21 @@ public class AuthController : ControllerBase
 
             var targetUserId = !string.IsNullOrWhiteSpace(authenticatedUserId) ? authenticatedUserId : dto.UserId;
 
-            var isDev = _environment.IsDevelopment();
-            var bypassInDebug = isDev && _configuration.GetValue<bool>("AuthSettings:BypassOtpInDebug", false);
-            bool isVerified;
-            if (bypassInDebug && (dto.OtpCode == "123456" || dto.OtpCode == "000000"))
-            {
-                isVerified = true;
-                if (!string.IsNullOrWhiteSpace(targetUserId) || !string.IsNullOrWhiteSpace(dto.Email) || !string.IsNullOrWhiteSpace(dto.Phone))
-                {
-                    await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, "123456", dto.Purpose.ToUpper());
-                }
-            }
-            else
-            {
-                // Atomic verification prevents TOCTOU race conditions and duplicate OTP reuse
-                isVerified = await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, dto.OtpCode, dto.Purpose.ToUpper());
-            }
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
+
+            // Atomic verification prevents TOCTOU race conditions and duplicate OTP reuse across all environments
+            var isVerified = await _authDataService.VerifyOtpAsync(targetUserId, dto.Email, dto.Phone, dto.OtpCode, dto.Purpose.ToUpper(), clientIp);
 
             if (!isVerified)
                 return BadRequest(ApiResponse.Fail("Invalid or expired OTP code."));
 
             _logger.LogInformation("OTP verified for UserId: {UserId}, Email: {Email}, Phone: {Phone}", targetUserId, dto.Email, dto.Phone);
             return Ok(ApiResponse.Ok("OTP verified successfully. Account is active."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning("Security limit triggered in VerifyOtp: {Message}", ex.Message);
+            return BadRequest(ApiResponse.Fail(ex.Message));
         }
         catch (Exception ex)
         {
@@ -531,7 +534,8 @@ public class AuthController : ControllerBase
             // 2. Unexpired OTP (expires_at >= GETUTCDATE())
             // 3. Exact purpose ("FORGOT_PASSWORD")
             // 4. Prevention of reuse
-            var isVerified = await _authDataService.VerifyOtpAsync(null, dto.Email, dto.Phone, dto.OtpCode, "FORGOT_PASSWORD");
+            var clientIp = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1";
+            var isVerified = await _authDataService.VerifyOtpAsync(null, dto.Email, dto.Phone, dto.OtpCode, "FORGOT_PASSWORD", clientIp);
 
             if (!isVerified)
                 return BadRequest(ApiResponse.Fail("Invalid or expired OTP verification code."));
@@ -550,6 +554,11 @@ public class AuthController : ControllerBase
 
             _logger.LogInformation("Password reset successfully for user: {Email}/{Phone}", dto.Email, dto.Phone);
             return Ok(ApiResponse.Ok("Password reset successfully. Please log in with your new password."));
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning("Security limit triggered in ResetPassword: {Message}", ex.Message);
+            return BadRequest(ApiResponse.Fail(ex.Message));
         }
         catch (Exception ex)
         {

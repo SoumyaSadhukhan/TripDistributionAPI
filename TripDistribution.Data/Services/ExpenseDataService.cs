@@ -15,6 +15,7 @@ public interface IExpenseDataService
     Task<ExpenseDetailDto> CreateExpenseAsync(CreateExpenseDto dto);
     Task<bool> UpdateExpenseAsync(string expenseId, UpdateExpenseDto dto);
     Task<bool> DeleteExpenseAsync(string expenseId);
+    Task<bool> RestoreExpenseAsync(string expenseId);
     Task<List<ExpenseSplitItemDto>> CalculateDietarySplitsAsync(string tripId, decimal totalAmount, int categoryIndex, List<string> selectedPersonIds);
 }
 
@@ -47,7 +48,7 @@ public class ExpenseDataService : IExpenseDataService
                        e.created_at AS CreatedAt
                 FROM Expenses e
                 LEFT JOIN Persons p ON e.paid_by_person_id = p.person_id
-                WHERE e.trip_id = @TripId
+                WHERE e.trip_id = @TripId AND ISNULL(e.is_deleted, 0) = 0
                 ORDER BY e.expense_date DESC";
 
             var expenses = (await conn.QueryAsync<ExpenseDetailDto>(expensesSql, new { TripId = tripId })).ToList();
@@ -95,7 +96,7 @@ public class ExpenseDataService : IExpenseDataService
                        e.created_at AS CreatedAt
                 FROM Expenses e
                 LEFT JOIN Persons p ON e.paid_by_person_id = p.person_id
-                WHERE e.expense_id = @ExpenseId";
+                WHERE e.expense_id = @ExpenseId AND ISNULL(e.is_deleted, 0) = 0";
 
             var expense = await conn.QuerySingleOrDefaultAsync<ExpenseDetailDto>(sql, new { ExpenseId = expenseId });
             if (expense == null) return null;
@@ -304,26 +305,52 @@ public class ExpenseDataService : IExpenseDataService
             var existing = await GetExpenseByIdAsync(expenseId);
             if (existing == null) return false;
 
-            using var trans = conn.BeginTransaction();
-            try
-            {
-                await conn.ExecuteAsync("DELETE FROM ExpenseSplits WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId }, transaction: trans);
-                var rows = await conn.ExecuteAsync("DELETE FROM Expenses WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId }, transaction: trans);
-                trans.Commit();
+            // Soft delete: mark expense as deleted without destroying splits or audit records
+            const string sql = @"
+                UPDATE Expenses 
+                SET is_deleted = 1, deleted_at = GETUTCDATE() 
+                WHERE expense_id = @ExpenseId;";
 
-                _logger.LogInformation("Deleted expense {ExpenseId}", expenseId);
-                await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
-                return rows > 0;
-            }
-            catch
+            var rows = await conn.ExecuteAsync(sql, new { ExpenseId = expenseId });
+            if (rows > 0)
             {
-                trans.Rollback();
-                throw;
+                _logger.LogInformation("Expense {ExpenseId} soft-deleted. Recalculating balances for trip {TripId}", expenseId, existing.TripId);
+                await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
             }
+            return rows > 0;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error deleting expense: {ExpenseId}", expenseId);
+            _logger.LogError(ex, "Error soft-deleting expense: {ExpenseId}", expenseId);
+            throw;
+        }
+    }
+
+    public async Task<bool> RestoreExpenseAsync(string expenseId)
+    {
+        try
+        {
+            using var conn = await _connectionFactory.CreateConnectionAsync();
+            var existing = await conn.QuerySingleOrDefaultAsync<ExpenseDetailDto>(
+                "SELECT expense_id AS ExpenseId, trip_id AS TripId FROM Expenses WHERE expense_id = @ExpenseId", new { ExpenseId = expenseId });
+            if (existing == null) return false;
+
+            const string sql = @"
+                UPDATE Expenses 
+                SET is_deleted = 0, deleted_at = NULL 
+                WHERE expense_id = @ExpenseId;";
+
+            var rows = await conn.ExecuteAsync(sql, new { ExpenseId = expenseId });
+            if (rows > 0)
+            {
+                _logger.LogInformation("Expense {ExpenseId} restored. Recalculating balances for trip {TripId}", expenseId, existing.TripId);
+                await _personDataService.RecalculateTripBalancesAsync(existing.TripId);
+            }
+            return rows > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error restoring expense: {ExpenseId}", expenseId);
             throw;
         }
     }
